@@ -240,12 +240,15 @@ TORCH_LIBRARY_EXPAND(sgl_kernel, m) {
   extern torch::Tensor gptq_gemm_rdna3_wmma(
       torch::Tensor a, torch::Tensor b_q_weight, torch::Tensor b_qzeros,
       torch::Tensor b_scales, torch::Tensor b_g_idx, bool use_v2_format);
+  extern void gptq_shuffle_rdna3(torch::Tensor qweight, torch::Tensor g_idx);
   m.def(
       "gptq_gemm_rdna3(Tensor a, Tensor b_q_weight, Tensor b_qzeros, Tensor b_scales, Tensor b_g_idx, bool use_v2_format=False) -> Tensor");
   m.impl("gptq_gemm_rdna3", torch::kCUDA, &gptq_gemm_rdna3);
   m.def(
       "gptq_gemm_rdna3_wmma(Tensor a, Tensor b_q_weight, Tensor b_qzeros, Tensor b_scales, Tensor b_g_idx, bool use_v2_format=False) -> Tensor");
   m.impl("gptq_gemm_rdna3_wmma", torch::kCUDA, &gptq_gemm_rdna3_wmma);
+  m.def("gptq_shuffle_rdna3(Tensor(a!) qweight, Tensor g_idx) -> ()");
+  m.impl("gptq_shuffle_rdna3", torch::kCUDA, &gptq_shuffle_rdna3);
 }
 
 REGISTER_EXTENSION(common_ops)

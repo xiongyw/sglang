@@ -60,6 +60,7 @@ sources = [
     "csrc/elementwise/pos_enc.cu",
     "csrc/gemm/gptq/q_gemm_rdna3.cu",
     "csrc/gemm/gptq/q_gemm_rdna3_wmma.cu",
+    "csrc/gemm/gptq/gptq_shuffle_rdna3.cu",
 ]
 
 cxx_flags = ["-O3"]
