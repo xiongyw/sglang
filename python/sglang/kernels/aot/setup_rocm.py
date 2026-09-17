@@ -58,6 +58,8 @@ sources = [
     "csrc/kvcacheio/transfer.cu",
     "csrc/memory/weak_ref_tensor.cpp",
     "csrc/elementwise/pos_enc.cu",
+    "csrc/gemm/gptq/q_gemm_rdna3.cu",
+    "csrc/gemm/gptq/q_gemm_rdna3_wmma.cu",
 ]
 
 cxx_flags = ["-O3"]

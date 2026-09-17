@@ -232,6 +232,20 @@ TORCH_LIBRARY_EXPAND(sgl_kernel, m) {
    */
   m.def("weak_ref_tensor(Tensor tensor) -> Tensor");
   m.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
+
+  /* Dense W4A16 GPTQ for the exact RX 7900 XTX appliance. */
+  extern torch::Tensor gptq_gemm_rdna3(
+      torch::Tensor a, torch::Tensor b_q_weight, torch::Tensor b_qzeros,
+      torch::Tensor b_scales, torch::Tensor b_g_idx, bool use_v2_format);
+  extern torch::Tensor gptq_gemm_rdna3_wmma(
+      torch::Tensor a, torch::Tensor b_q_weight, torch::Tensor b_qzeros,
+      torch::Tensor b_scales, torch::Tensor b_g_idx, bool use_v2_format);
+  m.def(
+      "gptq_gemm_rdna3(Tensor a, Tensor b_q_weight, Tensor b_qzeros, Tensor b_scales, Tensor b_g_idx, bool use_v2_format=False) -> Tensor");
+  m.impl("gptq_gemm_rdna3", torch::kCUDA, &gptq_gemm_rdna3);
+  m.def(
+      "gptq_gemm_rdna3_wmma(Tensor a, Tensor b_q_weight, Tensor b_qzeros, Tensor b_scales, Tensor b_g_idx, bool use_v2_format=False) -> Tensor");
+  m.impl("gptq_gemm_rdna3_wmma", torch::kCUDA, &gptq_gemm_rdna3_wmma);
 }
 
 REGISTER_EXTENSION(common_ops)
