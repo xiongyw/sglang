@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 import torch
+from rdna_build_plan import make_build_plan
 from setuptools import find_packages, setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
@@ -74,22 +75,18 @@ if torch.cuda.is_available():
 else:
     print(f"Warning: torch.cuda not available. Using default target: {amdgpu_target}")
 
-if amdgpu_target not in ["gfx942", "gfx950", "gfx1250"]:
+if amdgpu_target != "gfx1100":
     print(
-        f"Warning: Unsupported GPU architecture detected '{amdgpu_target}'. Expected 'gfx942', 'gfx950', or 'gfx1250'."
+        "7900xtx-qwen38-27b only builds for gfx1100; "
+        f"detected {amdgpu_target!r}."
     )
     sys.exit(1)
 
-fp8_macro = (
-    "-DHIP_FP8_TYPE_FNUZ" if amdgpu_target == "gfx942" else "-DHIP_FP8_TYPE_E4M3"
-)  # gfx950 and gfx1250 use E4M3
+build_plan = make_build_plan(amdgpu_target, sources)
+sources = list(build_plan.sources)
 
-# Dynamic shared-memory budget for the TopK kernels.
-# - gfx942 (MI300/MI325): LDS is typically 64KB per workgroup -> keep dynamic smem <= ~48KB
-#   (leaves room for static shared allocations in the kernel).
-# - gfx95x (MI350) and gfx1250: LDS is larger. Large dynamic budget wastes LDS
-#   and pins occupancy to 1 block/CU. Keep it small (40KB) for better occupancy.
-topk_dynamic_smem_bytes = 48 * 1024 if amdgpu_target == "gfx942" else 40 * 1024
+fp8_macro = "-DHIP_FP8_TYPE_E4M3"
+topk_dynamic_smem_bytes = build_plan.topk_dynamic_smem_bytes
 
 hipcc_flags = [
     "-DNDEBUG",
@@ -103,7 +100,9 @@ hipcc_flags = [
     "-DENABLE_FP8",
     fp8_macro,
     f"-DSGL_TOPK_DYNAMIC_SMEM_BYTES={topk_dynamic_smem_bytes}",
+    *build_plan.hipcc_flags,
 ]
+cxx_flags.extend(build_plan.cxx_flags)
 
 ext_modules = [
     CUDAExtension(
