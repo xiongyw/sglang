@@ -132,6 +132,12 @@ class GPTQConfig(QuantizationConfig):
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+        from sglang.srt.utils import is_hip
+
+        if is_hip() and torch.cuda.is_available():
+            arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
+            if arch == "gfx1100":
+                return [torch.half, torch.bfloat16]
         return [torch.half]
 
     @classmethod

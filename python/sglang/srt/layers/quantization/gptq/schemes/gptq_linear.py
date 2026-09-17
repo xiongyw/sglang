@@ -29,9 +29,19 @@ class GPTQLinearScheme(GPTQLinearSchemeBase):
         self.kernel = self._init_kernel(quant_config)
 
     def _init_kernel(self, quant_config: GPTQConfig):
+        from sglang.srt.utils import is_hip
+
+        if is_hip() and torch.cuda.is_available():
+            arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
+            if arch == "gfx1100":
+                from sglang.srt.hardware_backend.gpu.quantization.gptq_rdna3 import (
+                    GPTQLinearKernel,
+                )
+
+                return GPTQLinearKernel(quant_config)
         raise RuntimeError(
-            "The non-Marlin GPTQ CUDA kernel has been removed. Use "
-            "quantization='gptq_marlin' (or a Marlin-compatible checkpoint) instead."
+            "Plain GPTQ is supported by this branch only for the RX 7900 XTX "
+            "gfx1100 appliance."
         )
 
     def create_weights(
