@@ -28,6 +28,7 @@ from sglang.srt.utils.common import direct_register_custom_op, is_gfx95_supporte
 NVFP4_BLOCK_SIZE = 16
 
 _is_hip = is_hip()
+_has_aiter_mxfp4 = False
 
 # On GPUs that lack the fp4-activation WMMA scale instruction
 # (V_WMMA_SCALE_F32_32X16X128_F4, e.g. gfx1250) the a4w4 (fp4 x fp4) linear GEMM
@@ -83,14 +84,21 @@ def _dequant_mxfp4_to_bf16(
 
 
 if _is_hip:
-    from aiter.ops.triton.gemm.fused.fused_gemm_afp4wfp4_split_cat import (
-        fused_gemm_afp4wfp4_split_cat as _fused_gemm_afp4wfp4_split_cat_orig,
-    )
-    from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4 as _gemm_afp4wfp4_orig
-    from aiter.ops.triton.gemm_afp4wfp4_pre_quant_atomic import (
-        gemm_afp4wfp4_pre_quant as _gemm_afp4wfp4_pre_quant_orig,
-    )
-    from aiter.ops.triton.quant import dynamic_mxfp4_quant as _dynamic_mxfp4_quant_orig
+    try:
+        from aiter.ops.triton.gemm.fused.fused_gemm_afp4wfp4_split_cat import (
+            fused_gemm_afp4wfp4_split_cat as _fused_gemm_afp4wfp4_split_cat_orig,
+        )
+        from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4 as _gemm_afp4wfp4_orig
+        from aiter.ops.triton.gemm_afp4wfp4_pre_quant_atomic import (
+            gemm_afp4wfp4_pre_quant as _gemm_afp4wfp4_pre_quant_orig,
+        )
+        from aiter.ops.triton.quant import dynamic_mxfp4_quant as _dynamic_mxfp4_quant_orig
+
+        _has_aiter_mxfp4 = True
+    except ImportError:
+        pass
+
+if _is_hip and _has_aiter_mxfp4:
 
     def _aiter_gemm_afp4wfp4(
         x: torch.Tensor,
@@ -238,6 +246,10 @@ class QuarkW4A4MXFP4(QuarkLinearScheme):
         is_checkpoint_mxfp4_serialized: bool = True,
         dequantization_config: QuantizationConfig | None = None,
     ):
+        if not _has_aiter_mxfp4:
+            raise NotImplementedError(
+                "The MXFP4 scheme requires a compatible aiter installation."
+            )
         self.out_dtype = torch.get_default_dtype()
         self.qscheme = "per_group"
         self.weight_quant_spec = weight_quant_spec
