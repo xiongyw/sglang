@@ -92,6 +92,27 @@ from sglang.srt.utils.common import empty_context
 _is_npu = is_npu()
 
 
+def _validate_dflash_target_vocab_ids(tokens: torch.Tensor, *, vocab_size: int) -> None:
+    """Reject draft IDs that would fault the target embedding lookup."""
+    minimum = int(tokens.min())
+    maximum = int(tokens.max())
+    if minimum < 0 or maximum >= vocab_size:
+        raise ValueError(
+            "DFLASH draft emitted IDs outside the target vocabulary: "
+            f"range=[{minimum}, {maximum}], vocab_size={vocab_size}."
+        )
+
+
+def _dflash_triton_prepare_block_supported(*, is_cuda: bool, is_hip: bool) -> bool:
+    """HIP uses eager block preparation until the Triton path is validated."""
+    return is_cuda and not is_hip
+
+
+def _dflash_triton_accept_bonus_supported(*, is_cuda: bool, is_hip: bool) -> bool:
+    """HIP uses the eager exact verifier until accept/bonus Triton is validated."""
+    return is_cuda and not is_hip
+
+
 logger = logging.getLogger(__name__)
 
 _FusedKVMaterializeHelper = None
@@ -549,8 +570,12 @@ class DFlashWorkerV2(BaseSpecWorker):
             self._init_fused_kv_helper()
 
         supports_gpu_triton = is_cuda() or is_hip() or is_xpu()
-        self._use_triton_prepare_block = supports_gpu_triton
-        self._use_triton_accept_bonus = supports_gpu_triton
+        self._use_triton_prepare_block = _dflash_triton_prepare_block_supported(
+            is_cuda=is_cuda(), is_hip=is_hip()
+        )
+        self._use_triton_accept_bonus = _dflash_triton_accept_bonus_supported(
+            is_cuda=is_cuda(), is_hip=is_hip()
+        )
         # The legacy compact-rebuild path host-syncs twice per step (masked
         # gather's implicit nonzero D2H + lengths.max().item()); keep it only
         # for platforms without GPU triton.
@@ -2613,6 +2638,9 @@ class DFlashWorkerV2(BaseSpecWorker):
         draft_tokens = self._draft_block_tokens_buf[:bs]
         draft_tokens[:, 0].copy_(block_ids[:, 0])
         draft_tokens[:, 1:].copy_(draft_next)
+        _validate_dflash_target_vocab_ids(
+            draft_tokens, vocab_size=int(self.target_worker.model_runner.model_config.vocab_size)
+        )
 
         # Must stay ahead of the target verify launch below.
         grammar_tree = (
