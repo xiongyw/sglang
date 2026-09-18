@@ -32,7 +32,10 @@ class GPTQLinearKernel:
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         for name in ("qweight", "qzeros", "g_idx", "scales"):
             parameter = getattr(layer, name)
-            setattr(layer, name, torch.nn.Parameter(parameter.data, requires_grad=False))
+            data = parameter.data
+            if name == "scales" and data.dtype == torch.bfloat16:
+                data = data.to(torch.float16)
+            setattr(layer, name, torch.nn.Parameter(data, requires_grad=False))
         if layer.g_idx.numel() and not torch.equal(
             layer.g_idx, torch.arange(layer.g_idx.numel(), device=layer.g_idx.device) // 64
         ):

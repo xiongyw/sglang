@@ -47,6 +47,7 @@ class Test7900XtxGptqAdapter(unittest.TestCase):
         torch.cuda.synchronize()
 
         self.assertEqual(layer.g_idx.numel(), 0)
+        self.assertEqual(layer.scales.dtype, torch.float16)
         self.assertEqual(output.shape, (1, 8))
         self.assertTrue(torch.isfinite(output).all())
 
