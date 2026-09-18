@@ -45,7 +45,12 @@ from sglang.srt.speculative.dflash_utils import (
     is_nemotron_35_draft_config,
     parse_dflash_draft_config,
 )
-from sglang.srt.utils import is_npu, set_weight_attrs
+from sglang.srt.utils import is_hip, is_npu, set_weight_attrs
+
+
+def _dflash_triton_selector_supported(*, is_hip: bool) -> bool:
+    """HIP uses the eager selector walk until the Triton walk is validated."""
+    return not is_hip
 from sglang.srt.utils.common import get_compiler_backend
 from sglang.srt.utils.hf_transformers_utils import get_rope_config
 
@@ -1093,7 +1098,7 @@ class CandidateSelector(nn.Module):
         """Walk one path, with q over the K candidates for the verify. greedy_mask
         rows take the argmax, selected rather than branched, so one captured graph
         serves greedy and sampling batches alike."""
-        if scores.is_cuda:
+        if scores.is_cuda and _dflash_triton_selector_supported(is_hip=is_hip()):
             return selector_walk_triton(
                 candidate_ids=candidate_ids,
                 scores=scores,

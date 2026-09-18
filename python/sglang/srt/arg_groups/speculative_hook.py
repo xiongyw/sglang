@@ -254,6 +254,11 @@ def handle_speculative_decoding(server_args: ServerArgs) -> None:
             algo.handle_server_args(server_args)
 
 
+def _dflash_device_supported(*, device: str, is_hip: bool) -> bool:
+    """DFlash uses GPU Triton paths on CUDA, HIP, NPU, and XPU."""
+    return is_hip or device.startswith("cuda") or device in {"npu", "xpu"}
+
+
 def _handle_dflash(server_args: ServerArgs) -> None:
     cfg = resolving_view(server_args)
 
@@ -261,8 +266,8 @@ def _handle_dflash(server_args: ServerArgs) -> None:
     if current_platform.is_out_of_tree():
         is_supported = current_platform.supports_speculative_algorithm(algorithm)
     else:
-        is_supported = (
-            cfg.device.startswith("cuda") or cfg.device == "npu" or cfg.device == "xpu"
+        is_supported = _dflash_device_supported(
+            device=cfg.device, is_hip=get_platform().is_hip
         )
     if not is_supported:
         raise ValueError(

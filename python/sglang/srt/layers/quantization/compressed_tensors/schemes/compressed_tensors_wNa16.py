@@ -39,12 +39,23 @@ from sglang.srt.layers.quantization.utils import (
     replace_parameter,
     unpack_cols,
 )
-from sglang.srt.utils import is_cuda
+from sglang.srt.utils import is_cuda, is_hip
 
 _is_cuda = is_cuda()
+_is_rdna3 = is_hip()
 
 if _is_cuda:
     from sglang.kernels.ops.quantization.gptq_marlin_repack import gptq_marlin_repack
+
+
+def _rdna3_symmetric_zero_points(
+    *, groups: int, out_features: int, pack_factor: int, device: torch.device | str
+) -> torch.Tensor:
+    """Neutral packed GPTQ zero points for symmetric W4A16 RDNA weights."""
+    fill = sum(7 << (4 * i) for i in range(pack_factor))
+    return torch.full(
+        (groups, out_features // pack_factor), fill, dtype=torch.int32, device=device
+    )
 
 
 ScalarType, scalar_types = get_scalar_types()
@@ -102,6 +113,17 @@ class CompressedTensorsWNA16(CompressedTensorsLinearScheme):
                        **kwargs):
 
         output_size_per_partition = sum(output_partition_sizes)
+
+        if _is_rdna3:
+            if self.group_size == -1:
+                raise ValueError(
+                    "RDNA3 compressed-tensors W4A16 requires grouped weights; "
+                    "group_size=-1 is unsupported."
+                )
+            if self.has_g_idx:
+                raise ValueError(
+                    "RDNA3 compressed-tensors W4A16 does not support act-order weights."
+                )
 
         self.kernel_config = MarlinLinearLayerConfig(
             full_weight_shape=(input_size, output_size),
@@ -218,6 +240,10 @@ class CompressedTensorsWNA16(CompressedTensorsLinearScheme):
         device = getattr(layer, self.w_q_name).device
         c = self.kernel_config
 
+        if _is_rdna3:
+            self._process_weights_after_loading_rdna3(layer)
+            return
+
         check_marlin_supports_shape(
             c.partition_weight_shape[1],  # out_features
             c.partition_weight_shape[0],  # in_features
@@ -301,6 +327,39 @@ class CompressedTensorsWNA16(CompressedTensorsLinearScheme):
         _transform_param(layer, self.w_q_name, transform_w_q)
         _transform_param(layer, self.w_s_name, transform_w_s)
 
+    def _process_weights_after_loading_rdna3(self, layer: torch.nn.Module) -> None:
+        """Repack grouped symmetric W4A16 compressed-tensors for gfx1100 GPTQ."""
+        c = self.kernel_config
+        if c.weight_type.size_bits != 4 or not self.symmetric:
+            raise ValueError(
+                "RDNA3 compressed-tensors backend supports symmetric W4A16 only."
+            )
+        from sgl_kernel import common_ops  # noqa: F401
+
+        ops = torch.ops.sgl_kernel
+        w_q = getattr(layer, self.w_q_name)
+        permute_param_layout_(w_q, input_dim=0, output_dim=1, packed_dim=0)
+        w_q = w_q.data.contiguous()
+        g_idx = torch.empty((0,), dtype=torch.int32, device=w_q.device)
+        ops.gptq_shuffle_rdna3(w_q, g_idx)
+        replace_parameter(layer, self.w_q_name, w_q)
+
+        w_s = getattr(layer, self.w_s_name)
+        permute_param_layout_(w_s, input_dim=0, output_dim=1)
+        scales = w_s.data.contiguous()
+        if scales.dtype == torch.bfloat16:
+            scales = scales.to(torch.float16)
+        replace_parameter(layer, self.w_s_name, scales)
+
+        zeros = _rdna3_symmetric_zero_points(
+            groups=c.partition_weight_shape[0] // c.group_size,
+            out_features=c.partition_weight_shape[1],
+            pack_factor=self.pack_factor,
+            device=w_q.device,
+        )
+        setattr(layer, self.w_zp_name, torch.nn.Parameter(zeros, requires_grad=False))
+        setattr(layer, self.w_gidx_name, torch.nn.Parameter(g_idx, requires_grad=False))
+
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         c = self.kernel_config
@@ -321,6 +380,16 @@ class CompressedTensorsWNA16(CompressedTensorsLinearScheme):
             )
 
         w_q, w_s, w_zp, w_gidx = _get_weight_params(layer)
+
+        if _is_rdna3:
+            from sgl_kernel import common_ops  # noqa: F401
+
+            output = torch.ops.sgl_kernel.gptq_gemm_rdna3(
+                x.reshape(-1, x.shape[-1]).contiguous(), w_q, w_zp, w_s, w_gidx, True
+            )
+            if bias is not None:
+                output.add_(bias)
+            return output.reshape(x.shape[:-1] + (c.partition_weight_shape[1],))
 
         # `process_weights_after_loading` will ensure w_zp and w_gidx are not
         #  None for marlin

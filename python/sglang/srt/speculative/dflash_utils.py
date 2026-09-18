@@ -866,6 +866,11 @@ def can_dflash_use_fused_qkv_proj(qkv_proj: Any) -> Tuple[bool, str]:
     return True, ""
 
 
+def _dflash_triton_greedy_accept_supported(*, is_hip: bool) -> bool:
+    """The DFlash greedy-accept Triton reduction is not ROCm-safe yet."""
+    return not is_hip
+
+
 @triton.jit
 def _fused_correct_drafts_and_bonus_kernel(
     candidates_ptr,
@@ -924,7 +929,7 @@ def compute_dflash_correct_drafts_and_bonus(
     if block_size <= 0:
         raise ValueError(f"block_size must be positive, got {block_size}.")
 
-    if candidates.is_cuda:
+    if candidates.is_cuda and _dflash_triton_greedy_accept_supported(is_hip=is_hip()):
         num_correct_drafts = torch.empty(
             bs, dtype=torch.int32, device=candidates.device
         )
