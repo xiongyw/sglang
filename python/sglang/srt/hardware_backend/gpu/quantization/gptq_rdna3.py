@@ -7,6 +7,23 @@ from typing import Optional
 import torch
 
 
+def _is_identity_group_index(g_idx: torch.Tensor, group_size: int) -> bool:
+    """Whether ``g_idx`` is the identity grouping, allowing a TP shard offset.
+
+    A checkpoint with no activation reordering stores ``g_idx[i] = i // group_size``
+    over the full K dimension. Under tensor parallelism a row-parallel layer loads
+    only its own K-shard, so the surviving values are the same identity shifted by
+    the shard's first group; that is still identity ordering. A genuine act-order
+    permutation is not a contiguous blocked ramp and is rejected.
+    """
+    if g_idx.numel() == 0:
+        return True
+    expected = torch.arange(
+        g_idx.numel(), device=g_idx.device, dtype=torch.int32
+    ) // group_size
+    return bool(torch.equal(g_idx, expected + g_idx[0]))
+
+
 class GPTQLinearKernel:
     """Run the target checkpoint's identity-g_idx W4A16 tensors on gfx1100."""
 
@@ -36,11 +53,12 @@ class GPTQLinearKernel:
             if name == "scales" and data.dtype == torch.bfloat16:
                 data = data.to(torch.float16)
             setattr(layer, name, torch.nn.Parameter(data, requires_grad=False))
-        if layer.g_idx.numel() and not torch.equal(
-            layer.g_idx, torch.arange(layer.g_idx.numel(), device=layer.g_idx.device) // 64
-        ):
+        if not _is_identity_group_index(layer.g_idx, self.quant_config.group_size):
             raise ValueError(
-                "7900xtx-qwen38-27b requires identity GPTQ g_idx for the target checkpoint"
+                "7900xtx-qwen38-27b requires identity GPTQ g_idx for the target "
+                f"checkpoint (got {layer.g_idx.numel()} entries spanning groups "
+                f"{int(layer.g_idx.min())}..{int(layer.g_idx.max())} with "
+                f"group_size={self.quant_config.group_size})"
             )
         layer.g_idx = torch.nn.Parameter(
             torch.empty((0,), dtype=torch.int32, device=layer.qweight.device),
