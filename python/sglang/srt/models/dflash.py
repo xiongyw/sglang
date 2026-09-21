@@ -654,9 +654,24 @@ class DFlashDraftModel(nn.Module):
                 prefix=fc_prefix,
             )
         else:
-            self.fc = nn.Linear(
-                self.num_context_features * hidden_size, hidden_size, bias=False
-            )
+            # A quantized draft ships fc compressed like every other linear. Building
+            # it dense here silently drops fc.weight_packed/weight_scale — the names
+            # resolve to nothing and fc.weight keeps its random initialisation, which
+            # leaves the context projection meaningless while the server still loads
+            # "successfully" and simply accepts no draft tokens.
+            fc_prefix = f"{prefix}.fc" if prefix else "fc"
+            if quant_config is None:
+                self.fc = nn.Linear(
+                    self.num_context_features * hidden_size, hidden_size, bias=False
+                )
+            else:
+                self.fc = ReplicatedLinear(
+                    self.num_context_features * hidden_size,
+                    hidden_size,
+                    bias=False,
+                    quant_config=quant_config,
+                    prefix=fc_prefix,
+                )
         self.hidden_norm = RMSNorm(hidden_size, eps=rms_norm_eps)
 
         # The model loader calls load_weights() before set_block_size(). Build
@@ -715,7 +730,9 @@ class DFlashDraftModel(nn.Module):
     def project_target_hidden(self, target_hidden: torch.Tensor) -> torch.Tensor:
         """Project concatenated target-layer hidden states into draft hidden_size."""
         expected = int(
-            self.fc.input_size if self.is_nemotron_35_draft else self.fc.in_features
+            self.fc.input_size
+            if hasattr(self.fc, "input_size")
+            else self.fc.in_features
         )
         if target_hidden.ndim != 2 or int(target_hidden.shape[-1]) != expected:
             raise ValueError(
@@ -727,7 +744,7 @@ class DFlashDraftModel(nn.Module):
                 "the draft checkpoint/config expects."
             )
         projected = self.fc(target_hidden)
-        if self.is_nemotron_35_draft:
+        if isinstance(projected, tuple):
             projected = projected[0]
         return self.hidden_norm(projected)
 
@@ -871,6 +888,21 @@ class DFlashDraftModel(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(resolved_name)
 
+        # Either direction of the fc mismatch is silent and ruins acceptance: a
+        # quantized checkpoint supplies fc.weight_packed, a dense one supplies
+        # fc.weight, and whichever the module did not build for is skipped without
+        # complaint. Require the context projection to actually load.
+        fc_candidates = [
+            n for n in ("fc.weight", "fc.weight_packed") if n in params_dict
+        ]
+        if fc_candidates and not any(n in loaded_params for n in fc_candidates):
+            raise ValueError(
+                "DFLASH draft did not load its context projection: the checkpoint "
+                f"provides no weight matching {fc_candidates}. A quantized checkpoint "
+                "ships fc.weight_packed, so the draft must be built with a "
+                "quant_config; an unquantized one ships fc.weight, so it must not be."
+            )
+
         if self.projector_type == "domino":
             required = {
                 "prefix_gru.weight_ih_l0",
@@ -965,7 +997,9 @@ class DFlashLagunaForCausalLM(DFlashDraftModel):
 
     def project_target_hidden(self, target_hidden: torch.Tensor) -> torch.Tensor:
         expected = int(
-            self.fc.input_size if self.is_nemotron_35_draft else self.fc.in_features
+            self.fc.input_size
+            if hasattr(self.fc, "input_size")
+            else self.fc.in_features
         )
         if target_hidden.ndim != 2 or int(target_hidden.shape[-1]) != expected:
             raise ValueError(
@@ -986,7 +1020,7 @@ class DFlashLagunaForCausalLM(DFlashDraftModel):
             normed[:, i, :] = norm(slices[:, i, :])
         fused = normed.reshape(target_hidden.shape[0], -1)
         projected = self.fc(fused)
-        if self.is_nemotron_35_draft:
+        if isinstance(projected, tuple):
             projected = projected[0]
         return self.hidden_norm(projected)
 
