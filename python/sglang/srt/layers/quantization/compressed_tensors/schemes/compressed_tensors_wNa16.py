@@ -58,6 +58,26 @@ def _rdna3_symmetric_zero_points(
     )
 
 
+# compressed-tensors `pack-quantized` serializes qzeros as `zero_point - 1` (the
+# GPTQ-v1 convention), so the RDNA3 kernel must apply its `+1` zero offset. Feeding
+# it the GPTQ-v2 setting biases every dequantized weight by one scale unit: measured
+# relative error against exact dequantization is 0.046 at False versus 0.175 at True.
+# That bias compounds across draft layers until activations exceed the fp16 range the
+# kernel narrows to, which turns them into inf/NaN and zeroes speculative acceptance.
+RDNA3_COMPRESSED_TENSORS_V2_ZERO_OFFSET = False
+
+
+# The kernel chooses its activation behaviour from the scale dtype. fp16 scales select
+# the mixed instantiation, which converts bf16 activations to fp16 in-register, so an
+# activation above 65504 becomes inf and then NaN. bf16 scales select the native bf16
+# instantiation, which widens activations to fp32 and never narrows. Quantized
+# weight-only layers must take the second path: a DFlash2 draft reaches ~95,000 inside
+# its MLP, and a NaN draft state is indistinguishable from a useless one — acceptance
+# just collapses to 1.00 with no error. bf16 scales cost a few mantissa bits of scaling
+# precision and buy back the full bf16 activation range.
+RDNA3_W4A16_SCALES_DTYPE = torch.bfloat16
+
+
 ScalarType, scalar_types = get_scalar_types()
 
 logger = logging.getLogger(__name__)
@@ -347,8 +367,8 @@ class CompressedTensorsWNA16(CompressedTensorsLinearScheme):
         w_s = getattr(layer, self.w_s_name)
         permute_param_layout_(w_s, input_dim=0, output_dim=1)
         scales = w_s.data.contiguous()
-        if scales.dtype == torch.bfloat16:
-            scales = scales.to(torch.float16)
+        if scales.dtype != RDNA3_W4A16_SCALES_DTYPE:
+            scales = scales.to(RDNA3_W4A16_SCALES_DTYPE)
         replace_parameter(layer, self.w_s_name, scales)
 
         zeros = _rdna3_symmetric_zero_points(
@@ -385,7 +405,12 @@ class CompressedTensorsWNA16(CompressedTensorsLinearScheme):
             from sgl_kernel import common_ops  # noqa: F401
 
             output = torch.ops.sgl_kernel.gptq_gemm_rdna3(
-                x.reshape(-1, x.shape[-1]).contiguous(), w_q, w_zp, w_s, w_gidx, True
+                x.reshape(-1, x.shape[-1]).contiguous(),
+                w_q,
+                w_zp,
+                w_s,
+                w_gidx,
+                RDNA3_COMPRESSED_TENSORS_V2_ZERO_OFFSET,
             )
             if bias is not None:
                 output.add_(bias)
