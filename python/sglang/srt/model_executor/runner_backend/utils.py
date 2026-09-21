@@ -47,9 +47,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Track first occurrence of each fallback warning to avoid log spam.
-_TC_PIECEWISE_DECODE_FALLBACK_LOGGED = False
-
 
 def resolve_decode_backend(
     cuda_graph_runner: BaseCudaGraphRunner,
@@ -91,13 +88,18 @@ def resolve_decode_backend(
             debug_eager=get_exec().graph.debug_cuda_graph,
         )
     if backend_name == Backend.TC_PIECEWISE:
-        global _TC_PIECEWISE_DECODE_FALLBACK_LOGGED
-        if not _TC_PIECEWISE_DECODE_FALLBACK_LOGGED:
-            logger.warning(
-                "cuda_graph_config decode='tc_piecewise' is not yet implemented; "
-                "falling back to 'full'."
-            )
-            _TC_PIECEWISE_DECODE_FALLBACK_LOGGED = True
+        # Upstream logged one warning and then built the full backend anyway, which
+        # made --cuda-graph-backend-decode=tc_piecewise indistinguishable from
+        # 'full' in behaviour, memory and captured graphs. The target contract for
+        # this appliance requires an unsupported configuration to fail fast: a
+        # silent fallback here would let a benchmark result be attributed to a
+        # backend that never ran.
+        raise ValueError(
+            "cuda_graph_config decode backend 'tc_piecewise' is not implemented; "
+            f"decode supports {Backend.FULL!r}, {Backend.BREAKABLE!r} and "
+            f"{Backend.DISABLED!r}. tc_piecewise is implemented for the prefill "
+            "phase only (--cuda-graph-backend-prefill tc_piecewise)."
+        )
 
     full_backend_cls = None
     if current_platform.is_out_of_tree():

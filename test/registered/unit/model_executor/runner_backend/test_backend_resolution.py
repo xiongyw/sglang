@@ -185,5 +185,47 @@ class TestResolveDecodeBackend(CustomTestCase):
         )
 
 
+    def test_tc_piecewise_decode_backend_fails_fast(self):
+        """An unimplemented decode backend must not look like it was honoured.
+
+        Upstream logged a single warning and then built the full backend anyway, so
+        requesting --cuda-graph-backend-decode=tc_piecewise was indistinguishable
+        from 'full' in behaviour, memory and graph capture. The target contract for
+        this appliance requires an unsupported configuration to fail fast instead of
+        silently falling back.
+        """
+        runner = _make_graph_runner()
+        exec_config = _make_exec_config(backend=Backend.TC_PIECEWISE)
+        platform = _make_platform(is_out_of_tree=False)
+
+        with (
+            mock.patch.object(
+                backend_utils,
+                "get_exec",
+                return_value=exec_config,
+            ),
+            mock.patch.object(
+                backend_utils,
+                "current_platform",
+                platform,
+            ),
+            mock.patch.object(
+                backend_utils,
+                "FullCudaGraphBackend",
+            ) as full_backend_cls,
+        ):
+            with self.assertRaises(ValueError) as caught:
+                backend_utils.resolve_decode_backend(runner)
+
+        message = str(caught.exception)
+        self.assertIn("tc_piecewise", message)
+        self.assertIn("full", message)
+        self.assertIn("breakable", message)
+        # The error must say where tc_piecewise does work, or it sends the reader
+        # to the wrong place.
+        self.assertIn("prefill", message)
+        full_backend_cls.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
