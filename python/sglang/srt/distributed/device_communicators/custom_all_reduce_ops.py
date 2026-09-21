@@ -125,6 +125,11 @@ elif _is_hip:
     def get_meta_buffer_ipc_handle(inp: torch.Tensor) -> torch.Tensor:
         return _custom_ar.get_meta_buffer_ipc_handle(inp)
 
+    def allocate_reg_buffer(size: int) -> torch.Tensor:
+        # Uncached, IPC-exportable memory for the registered all-reduce data
+        # buffer. See _allocate_registered_buffer in custom_all_reduce.py.
+        return _custom_ar.allocate_reg_buffer(size)
+
 
 # endregion
 

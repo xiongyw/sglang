@@ -67,10 +67,8 @@ TORCH_LIBRARY_EXPAND(sgl_kernel, m) {
   m.impl("dsv4_fused_q_indexer_rope_hadamard_quant", torch::kCUDA, &dsv4_fused_q_indexer_rope_hadamard_quant);
 
   /*
-   * From csrc/allreduce. These operators are not built for the appliance's
-   * RDNA3 target, so their declarations and registrations stay together.
+   * From csrc/allreduce.
    */
-#ifndef SGL_IS_RDNA
   m.def(
       "init_custom_ar(Tensor meta, Tensor rank_data, "
       "str[] handles, int[] offsets, int rank, "
@@ -110,6 +108,8 @@ TORCH_LIBRARY_EXPAND(sgl_kernel, m) {
 
   m.def("allocate_meta_buffer", &allocate_meta_buffer);
   m.impl("allocate_meta_buffer", torch::kCUDA, &allocate_meta_buffer);
+  m.def("allocate_reg_buffer", &allocate_reg_buffer);
+  m.impl("allocate_reg_buffer", torch::kCUDA, &allocate_reg_buffer);
 
   m.def("get_meta_buffer_ipc_handle", &get_meta_buffer_ipc_handle);
   m.impl("get_meta_buffer_ipc_handle", torch::kCPU, &get_meta_buffer_ipc_handle);
@@ -130,7 +130,6 @@ TORCH_LIBRARY_EXPAND(sgl_kernel, m) {
 
   // Max input size in bytes
   m.def("qr_max_size", &qr_max_size);
-#endif  // !SGL_IS_RDNA
 
   /*
    * From csrc/moe
