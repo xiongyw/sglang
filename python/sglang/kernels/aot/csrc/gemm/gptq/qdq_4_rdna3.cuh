@@ -179,6 +179,17 @@ __forceinline__ __device__ void prep_zero_scale_bf16_f32(uint32_t zero,
   y_prep = scale_f;
 }
 
+// Same constants as above, but with the scale already widened to fp32. The
+// activation dtype and the scale storage dtype are independent: fp16 scales
+// are widened here (exact — fp16 values are exactly representable in fp32)
+// rather than being rounded to bf16 first, so the mixed instantiation keeps
+// the checkpoint's full scale precision while its activations stay in bf16.
+__forceinline__ __device__ void prep_zero_scale_bf16_f32_from_float(
+    uint32_t zero, float scale_f, float& z_prep, float& y_prep) {
+  z_prep = -(128.0f + (float)zero) * scale_f;
+  y_prep = scale_f;
+}
+
 // Pure-q dequant for the M_COUNT=1 factored path: outputs the unscaled fp32
 // values 128+nibble, without folding scale/zero. The caller folds scale/zb
 // into the accumulator outside the inner loop using a precomputed sum_a,
