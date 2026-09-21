@@ -67,15 +67,13 @@ def _rdna3_symmetric_zero_points(
 RDNA3_COMPRESSED_TENSORS_V2_ZERO_OFFSET = False
 
 
-# The kernel chooses its activation behaviour from the scale dtype. fp16 scales select
-# the mixed instantiation, which converts bf16 activations to fp16 in-register, so an
-# activation above 65504 becomes inf and then NaN. bf16 scales select the native bf16
-# instantiation, which widens activations to fp32 and never narrows. Quantized
-# weight-only layers must take the second path: a DFlash2 draft reaches ~95,000 inside
-# its MLP, and a NaN draft state is indistinguishable from a useless one — acceptance
-# just collapses to 1.00 with no error. bf16 scales cost a few mantissa bits of scaling
-# precision and buy back the full bf16 activation range.
-RDNA3_W4A16_SCALES_DTYPE = torch.bfloat16
+# The kernel carries the scale storage dtype as its own template parameter, so fp16
+# scales against bf16 activations are a supported pair: the activations stay bf16 (an
+# activation that is narrowed to fp16 above ~65504 becomes inf and then NaN, and a NaN
+# draft state is indistinguishable from a useless one — acceptance collapses to 1.00
+# with no error) while the scales are widened to fp32 exactly. Keep the dtype the
+# checkpoint ships; only normalize a dtype the kernel does not accept at all.
+RDNA3_W4A16_SCALES_DTYPES = (torch.float16, torch.bfloat16)
 
 
 ScalarType, scalar_types = get_scalar_types()
@@ -367,8 +365,8 @@ class CompressedTensorsWNA16(CompressedTensorsLinearScheme):
         w_s = getattr(layer, self.w_s_name)
         permute_param_layout_(w_s, input_dim=0, output_dim=1)
         scales = w_s.data.contiguous()
-        if scales.dtype != RDNA3_W4A16_SCALES_DTYPE:
-            scales = scales.to(RDNA3_W4A16_SCALES_DTYPE)
+        if scales.dtype not in RDNA3_W4A16_SCALES_DTYPES:
+            scales = scales.to(RDNA3_W4A16_SCALES_DTYPES[0])
         replace_parameter(layer, self.w_s_name, scales)
 
         zeros = _rdna3_symmetric_zero_points(
