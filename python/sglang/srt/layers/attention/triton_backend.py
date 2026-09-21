@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
 
@@ -53,6 +54,7 @@ from sglang.srt.utils import (
     is_cuda,
     is_gfx95_supported,
     is_gfx942_supported,
+    is_gfx1100_supported,
     is_hip,
     is_xpu,
     next_power_of_2,
@@ -75,6 +77,9 @@ if TYPE_CHECKING:
 _MLA_DECODE_MIN_BLOCK_KV = 32
 
 
+logger = logging.getLogger(__name__)
+
+
 def _mla_decode_kv_splits_cap(
     base_max_kv_splits: int, sm_count: int, max_context_len: int
 ) -> int:
@@ -83,6 +88,43 @@ def _mla_decode_kv_splits_cap(
     sm_cap = next_power_of_2(sm_count)
     ctx_cap = next_power_of_2(triton.cdiv(max_context_len, _MLA_DECODE_MIN_BLOCK_KV))
     return max(base_max_kv_splits, min(sm_cap, ctx_cap))
+
+
+# Exact-target gate for the split-KV verify kernel on RDNA3. The kernel is written for
+# CDNA (gfx95); this branch admits exactly one more target, the 2x RX 7900 XTX /
+# Qwen3.8-27B W4A16 appliance, and only for the attention geometry that was validated
+# standalone before wiring (`~/sglang-setup/spike_verify_splitkv.py`: correct against an
+# fp32 reference at 12 query heads, 2 KV heads, head_dim 256, l_ext 8, and 4.09x faster
+# than an unsplit sweep at 32k - 8.87 -> 2.17 ms per layer, 4.7% -> 19.3% of peak DRAM
+# bandwidth). gfx1100 alone is deliberately NOT sufficient: the geometry is part of the
+# gate because the spike covers that shape and nothing else. `can_handle()` in
+# kernels/ops/attention/verify_splitkv.py still gates every individual call, so anything
+# unsupported falls back to extend_attention_fwd instead of running.
+_APPLIANCE_SPLITKV_Q_HEADS_PER_RANK = 12  # 24 query heads / TP 2
+_APPLIANCE_SPLITKV_KV_HEADS_PER_RANK = 2  # 4 KV heads / TP 2
+_APPLIANCE_SPLITKV_HEAD_DIM = 256
+_APPLIANCE_SPLITKV_L_EXT = 8  # DFlash2 block size == speculative_num_draft_tokens
+
+
+def _is_appliance_splitkv_verify_target(model_runner) -> bool:
+    """gfx1100 *and* the appliance's exact verify geometry (see the constants above)."""
+    if not is_gfx1100_supported():
+        return False
+    cfg = model_runner.model_config
+    if int(cfg.head_dim or 0) != _APPLIANCE_SPLITKV_HEAD_DIM:
+        return False
+    attn_tp_size = get_parallel().attn_tp_size
+    if (
+        cfg.get_max_num_attention_heads() // attn_tp_size
+        != _APPLIANCE_SPLITKV_Q_HEADS_PER_RANK
+    ):
+        return False
+    if (
+        cfg.get_num_kv_heads(attn_tp_size, get_parallel().attn_dcp_size)
+        != _APPLIANCE_SPLITKV_KV_HEADS_PER_RANK
+    ):
+        return False
+    return get_spec().speculative_num_draft_tokens == _APPLIANCE_SPLITKV_L_EXT
 
 
 def _should_use_verify_shared_kv(model_config, topk, use_mla, use_verify_splitkv):
@@ -217,13 +259,25 @@ class TritonAttnBackend(AttentionBackend):
         self.target_verify_num_tokens_per_req = model_runner.decode_num_tokens_per_req()
         self.speculative_num_steps = get_spec().speculative_num_steps
         self.topk = get_spec().speculative_eagle_topk or 0
-        # Split-KV verify is bit-equivalent only for a pure-causal chain (topk==1)
-        # and is gfx95-only; else fall back to extend_attention_fwd.
+        # Split-KV verify is bit-equivalent only for a pure-causal chain (topk==1).
+        # Written for gfx95; this branch additionally admits the exact gfx1100 appliance
+        # target (see _is_appliance_splitkv_verify_target). Everything else falls back
+        # to extend_attention_fwd.
         self.use_verify_splitkv = (
-            is_gfx95_supported()
+            (is_gfx95_supported() or _is_appliance_splitkv_verify_target(model_runner))
             and envs.SGLANG_ENABLE_SPLITKV_VERIFY.get()
             and self.topk == 1
         )
+        if self.use_verify_splitkv and not is_gfx95_supported():
+            logger.info(
+                "verify attention: split-KV kernel admitted for the gfx1100 appliance "
+                "target (q_heads/rank=%d, kv_heads/rank=%d, head_dim=%d, l_ext=%d); "
+                "can_handle() still gates each call",
+                _APPLIANCE_SPLITKV_Q_HEADS_PER_RANK,
+                _APPLIANCE_SPLITKV_KV_HEADS_PER_RANK,
+                _APPLIANCE_SPLITKV_HEAD_DIM,
+                _APPLIANCE_SPLITKV_L_EXT,
+            )
         self.use_mla = model_runner.model_config.attention_arch == AttentionArch.MLA
         # The grouped-head verify kernel is tuned for Kimi-K3 MLA and Qwen3.5
         # GQA with exactly one TP-local KV head.
