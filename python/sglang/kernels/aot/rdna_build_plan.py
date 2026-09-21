@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Iterable
 
 TARGET_ARCH = "gfx1100"
-_ALLREDUCE_PREFIX = "csrc/allreduce/"
 
 
 @dataclass(frozen=True)
@@ -29,7 +28,7 @@ def make_build_plan(amdgpu_target: str, sources: Iterable[str]) -> RdnaBuildPlan
         )
     return RdnaBuildPlan(
         is_target=True,
-        sources=tuple(source for source in sources if not source.startswith(_ALLREDUCE_PREFIX)),
+        sources=tuple(sources),
         topk_dynamic_smem_bytes=48 * 1024,
         hipcc_flags=("-DSGL_IS_RDNA",),
         cxx_flags=("-DSGL_IS_RDNA",),

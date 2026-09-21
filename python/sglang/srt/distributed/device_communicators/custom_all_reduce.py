@@ -37,6 +37,31 @@ _is_musa = is_musa()
 logger = logging.getLogger(__name__)
 
 
+def _allocate_registered_buffer(ops_mod, max_size: int, device) -> torch.Tensor:
+    """Allocate the registered all-reduce data buffer.
+
+    On HIP this buffer is shared with peers: each rank publishes it via an IPC
+    handle and the 1-stage kernel reads every rank's copy through peer pointers,
+    so it must be uncached and IPC-exportable. Cached graph activations are not
+    safe to publish over PCIe because a peer cannot rely on observing the producer's
+    dirty L2 lines; non-XGMI callers stage through this buffer.
+
+    Fail fast if the dedicated allocator is missing; silently falling back to a
+    pooled allocation is the correctness bug this guards against.
+    """
+    if _is_hip:
+        alloc = getattr(ops_mod, "allocate_reg_buffer", None)
+        if alloc is None:
+            raise RuntimeError(
+                "HIP custom all-reduce requires ops.allocate_reg_buffer for the "
+                "registered data buffer (uncached, IPC-exportable); refusing to "
+                "fall back to a pooled torch allocation, which silently produces "
+                "local-only sums across peers."
+            )
+        return alloc(max_size)
+    return torch.empty(max_size, dtype=torch.uint8, device=device)
+
+
 class CustomAllreduce:
     _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]
     _MAX_CAR_SIZE = 8192 * 1024
@@ -124,7 +149,7 @@ class CustomAllreduce:
         else:
             # meta data buffers need to be "uncached" for signal on MI200
             self.meta = ops.allocate_meta_buffer(ops.meta_size() + max_size)
-            self.buffer = torch.empty(max_size, dtype=torch.uint8, device=self.device)
+            self.buffer = _allocate_registered_buffer(ops, max_size, self.device)
             handle = ops.get_meta_buffer_ipc_handle(self.meta)
             shard_data = (
                 bytes(handle),  # ipc handle to base ptr
@@ -235,7 +260,6 @@ class CustomAllreduce:
         if _is_hip:
             handle, offset = ops.get_graph_buffer_ipc_meta(self._ptr)
             handles, offsets = self._gather_ipc_meta((bytes(handle), offset))
-            log_info_on_rank0(logger, f"Registering {len(offset)} cuda graph addresses")
             ops.register_graph_buffers(self._ptr, handles, offsets)
         else:
             handle, offset = ops.get_graph_buffer_ipc_meta(self._ptr)
@@ -278,6 +302,15 @@ class CustomAllreduce:
                 return True
             if self.full_nvlink:
                 return inp_size <= self.max_size
+            # Target profile (RX 7900 XTX x2, gfx1100): the two cards sit behind a
+            # PLX switch and link over PCIe, never XGMI, so `full_nvlink` is always
+            # False here and upstream would decline custom AR by policy. Peer
+            # access is functional (`hipDeviceCanAccessPeer` true both directions),
+            # so select custom AR for the two-rank topology the profile is tuned
+            # for, and only for inputs inside max_size. Wider worlds keep the
+            # upstream XGMI requirement, since they are not tuned or validated.
+            if self.world_size == 2:
+                return inp_size <= self.max_size
             return False
 
         return False
@@ -306,6 +339,29 @@ class CustomAllreduce:
                 ops.all_reduce_unreg(self._ptr, inp, self.buffer, out)
         return out
 
+    def _may_publish_input_buffer(self) -> bool:
+        """May the caller's buffer itself be published to the peers?
+
+        The 1-stage kernel reads every rank's contribution straight out of that
+        rank's buffer through a peer pointer, so the peers must be able to observe
+        the producing rank's stores. That holds only on a coherent fabric: over XGMI
+        a peer sees the producer's dirty L2 lines, but over PCIe it does not (the
+        peer's L2 is not snooped). Publishing a cacheable activation buffer on PCIe
+        therefore yields a stale read - measured here as a reduce that returns only
+        the local contribution, or that mixes in a value from a previous invocation.
+
+        So on a non-XGMI fabric the contribution is staged instead: it is copied
+        into the registered buffer, which is uncached device memory
+        (`allocate_reg_buffer`), and the peers read that. The copy costs one
+        device-to-device memcpy of the input per all-reduce.
+        """
+        if self.tms_cudagraph:
+            return False
+        if _is_hip and not self.full_nvlink:
+            # PCIe-attached AMD GPUs: no cross-device cache coherence.
+            return False
+        return True
+
     def custom_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
         """The main allreduce API that provides support for cuda graph."""
         # When custom allreduce is disabled, this will be None.
@@ -313,7 +369,9 @@ class CustomAllreduce:
             return None
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
-                return self._all_reduce_impl(input, registered=not self.tms_cudagraph)
+                return self._all_reduce_impl(
+                    input, registered=self._may_publish_input_buffer()
+                )
             else:
                 # Could be warmup OR piecewise cuda graph split op execution.
                 # In piecewise cuda graph, split ops run eagerly outside the graph

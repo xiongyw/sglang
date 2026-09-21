@@ -39,7 +39,7 @@ class Test7900XtxAotBuildPlan(unittest.TestCase):
         plan = module.make_build_plan("gfx1100", sources)
 
         self.assertTrue(plan.is_target)
-        self.assertEqual(plan.sources, ("csrc/common_extension_rocm.cc",))
+        self.assertEqual(plan.sources, tuple(sources))
         self.assertEqual(plan.topk_dynamic_smem_bytes, 48 * 1024)
         self.assertIn("-DSGL_IS_RDNA", plan.hipcc_flags)
         self.assertIn("-DSGL_IS_RDNA", plan.cxx_flags)
@@ -50,7 +50,7 @@ class Test7900XtxAotBuildPlan(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "expects gfx1100"):
             module.make_build_plan("gfx1151", ["csrc/common_extension_rocm.cc"])
 
-    def test_allreduce_filter_keeps_non_allreduce_sources(self) -> None:
+    def test_source_plan_preserves_allreduce_and_other_sources(self) -> None:
         module = load_build_plan_module()
         sources = [
             "csrc/allreduce/custom_all_reduce.hip",
@@ -60,13 +60,7 @@ class Test7900XtxAotBuildPlan(unittest.TestCase):
 
         plan = module.make_build_plan("gfx1100", sources)
 
-        self.assertEqual(
-            plan.sources,
-            (
-                "csrc/gemm/gptq/q_gemm_rdna3.cu",
-                "csrc/elementwise/topk.hip",
-            ),
-        )
+        self.assertEqual(plan.sources, tuple(sources))
 
 
 if __name__ == "__main__":

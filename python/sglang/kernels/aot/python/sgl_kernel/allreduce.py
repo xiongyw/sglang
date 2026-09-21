@@ -58,6 +58,11 @@ if torch.version.hip is not None:
     def allocate_meta_buffer(size: int) -> torch.Tensor:
         return torch.ops.sgl_kernel.allocate_meta_buffer.default(size)
 
+    def allocate_reg_buffer(size: int) -> torch.Tensor:
+        # Uncached, IPC-exportable memory for the registered all-reduce data
+        # buffer; see _allocate_registered_buffer in custom_all_reduce.py.
+        return torch.ops.sgl_kernel.allocate_reg_buffer.default(size)
+
     def get_meta_buffer_ipc_handle(inp: torch.Tensor) -> torch.Tensor:
         return torch.ops.sgl_kernel.get_meta_buffer_ipc_handle.default(inp)
 
