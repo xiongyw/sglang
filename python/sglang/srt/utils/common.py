@@ -1141,6 +1141,21 @@ def is_gfx95_supported():
 
 
 @lru_cache(maxsize=1)
+def is_gfx1100_supported():
+    """Whether the device is an AMD gfx1100 GPU (RDNA3, RX 7900 XTX / W7800 class).
+
+    Exact arch on purpose: kernel/tuning selection must name the device it was
+    validated on, so this does not cover "RDNA3" or gfx1101/gfx1102. False on every
+    non-HIP build, like its gfx95/gfx942 siblings.
+    """
+    if torch.version.hip:
+        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
+        return any(gfx in gcn_arch for gfx in ["gfx1100"])
+    else:
+        return False
+
+
+@lru_cache(maxsize=1)
 def is_gfx942_supported():
     """
     Returns whether the current platform is AMD CDNA3 (gfx942 — MI300X / MI325X).
