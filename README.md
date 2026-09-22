@@ -1,99 +1,316 @@
-<div align="center" id="sglangtop">
-<img src="https://raw.githubusercontent.com/sgl-project/sglang/main/assets/logo.png" alt="logo" width="400" margin="10px"></img>
+# SGLang: RX 7900 XTX / Qwen3.8-27B TP2 appliance branch
 
-[![PyPI](https://img.shields.io/pypi/v/sglang)](https://pypi.org/project/sglang)
-![PyPI - Downloads](https://static.pepy.tech/badge/sglang?period=month)
-[![license](https://img.shields.io/github/license/sgl-project/sglang.svg)](https://github.com/sgl-project/sglang/tree/main/LICENSE)
-[![issue resolution](https://img.shields.io/github/issues-closed-raw/sgl-project/sglang)](https://github.com/sgl-project/sglang/issues)
-[![open issues](https://img.shields.io/github/issues-raw/sgl-project/sglang)](https://github.com/sgl-project/sglang/issues)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/sgl-project/sglang)
+[简体中文](README.zh-CN.md)
 
-</div>
+This branch is a narrow, measured specialization of SGLang for the following appliance:
 
---------------------------------------------------------------------------------
+```text
+Hardware:   2 × AMD Radeon RX 7900 XTX, gfx1100, 24 GiB each
+Runtime:    ROCm 7.2.4 / HIP 7.2.26015 / PyTorch 2.11.0+rocm7.2
+Target:     Qwen3.8-27B W4A16 AutoRound-GPTQ
+Drafter:    Qwen3.8-27B DFlash2 W4A16
+Topology:   TP=2, PP=1
+Activations: BF16
+KV cache:   BF16
+```
 
-<p align="center">
-<a href="https://www.sglang.io/"><b>🌐 Website</b></a> |
-<a href="https://lmsys.org/blog/"><b>Blog</b></a> |
-<a href="https://docs.sglang.io/"><b>Documentation</b></a> |
-<a href="https://roadmap.sglang.io/"><b>Roadmap</b></a> |
-<a href="https://slack.sglang.io/"><b>Join Slack</b></a> |
-<a href="https://meet.sglang.io/"><b>Weekly Dev Meeting</b></a> |
-<a href="https://github.com/sgl-project/sgl-learning-materials?tab=readme-ov-file#slides"><b>Slides</b></a>
-</p>
+It is not a general gfx1100 backend and is not a generic TP=2 solution. Unsupported model layouts, quantization formats, GPU profiles, and speculative layouts should not be treated as covered by this branch.
 
-## News
-- [2026/07] 🔥 SGLang and Miles add day-0 support for Kimi K3 ([blog](https://lmsys.org/blog/2026-07-27-kimi-k3-day0-support/)).
-- [2026/07] RadixArk and Google bring full SGLang features to TPUs ([blog](https://lmsys.org/blog/2026-07-30-sglang-google-tpu/)).
-- [2026/07] Serving GLM5.2 NVFP4 agentic workloads with SGLang: Reaching 500 TPS in two weeks ([blog](https://lmsys.org/blog/2026-07-13-glm52-optimization/)).
-- [2026/06] 🔥 The next generation of speculative decoding: DFlash and Spec V2 ([blog](https://lmsys.org/blog/2026-06-15-next-generation-speculative-decoding-dflash-v2/)).
-- [2026/06] SGLang provides day-0 support for latest open models ([Nemotron 3 Ultra](https://lmsys.org/blog/2026-06-04-nvidia-run-nemotron-3-ultra/), [Nemotron 3 Super](https://lmsys.org/blog/2026-03-11-run-nvidia-nemotron-3-super/), [Higgs Audio v3 TTS](https://lmsys.org/blog/2026-06-04-higgs-audio-v3-tts/)).
-- [2026/04] 🔥 DeepSeek-V4 on Day 0: From Fast Inference to Verified RL with SGLang and Miles ([blog](https://lmsys.org/blog/2026-04-25-deepseek-v4/)).
-- [2026/02] 🔥 Unlocking 25x Inference Performance with SGLang on NVIDIA GB300 NVL72 ([blog](https://lmsys.org/blog/2026-02-20-gb300-inferencex/)).
-- [2026/01] SGLang Diffusion accelerates video and image generation ([blog](https://lmsys.org/blog/2026-01-16-sglang-diffusion/)).
+## Branch lineage and scope
 
-<details>
-<summary>More</summary>
+The branch is just a "copy" from JWC's [`StevenChenSE/sglang`](https://github.com/StevenChenSE/sglang) `gfx1100-support` work. It differs from that work in three deliberate ways:
 
-- [2025/12] SGLang provides day-0 support for latest open models ([MiMo-V2-Flash](https://lmsys.org/blog/2025-12-16-mimo-v2-flash/), [Nemotron 3 Nano](https://lmsys.org/blog/2025-12-15-run-nvidia-nemotron-3-nano/), [Mistral Large 3](https://github.com/sgl-project/sglang/pull/14213), [LLaDA 2.0 Diffusion LLM](https://lmsys.org/blog/2025-12-19-diffusion-llm/), [MiniMax M2](https://lmsys.org/blog/2025-11-04-miminmax-m2/)).
-- [2025/11] SGLang Diffusion accelerates video and image generation ([blog](https://lmsys.org/blog/2025-11-07-sglang-diffusion/)).
-- [2025/10] SGLang now runs natively on TPU with the SGLang-Jax backend ([blog](https://lmsys.org/blog/2025-10-29-sglang-jax/)).
-- [2025/10] PyTorch Conference 2025 SGLang Talk ([slide](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/sglang_pytorch_2025.pdf)).
-- [2025/10] SGLang x Nvidia SF Meetup on 10/2 ([recap](https://x.com/lmsysorg/status/1975339501934510231)).
-- [2025/09] Deploying DeepSeek on GB200 NVL72 with PD and Large Scale EP (Part II): 3.8x Prefill, 4.8x Decode Throughput ([blog](https://lmsys.org/blog/2025-09-25-gb200-part-2/)).
-- [2025/09] SGLang Day 0 Support for DeepSeek-V3.2 with Sparse Attention ([blog](https://lmsys.org/blog/2025-09-29-deepseek-V32/)).
-- [2025/08] SGLang x AMD SF Meetup on 8/22: Hands-on GPU workshop, tech talks by AMD/xAI/SGLang, and networking ([Roadmap](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_sglang_roadmap.pdf), [Large-scale EP](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_sglang_ep.pdf), [Highlights](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_highlights.pdf), [AITER/MoRI](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_aiter_mori.pdf), [Wave](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_wave.pdf)).
-- [2025/08] SGLang provides day-0 support for OpenAI gpt-oss model ([instructions](https://github.com/sgl-project/sglang/issues/8833))
-- [2025/06] SGLang, the high-performance serving infrastructure powering trillions of tokens daily, has been awarded the third batch of the Open Source AI Grant by a16z ([a16z blog](https://a16z.com/advancing-open-source-ai-through-benchmarks-and-bold-experimentation/)).
-- [2025/06] Deploying DeepSeek on GB200 NVL72 with PD and Large Scale EP (Part I): 2.7x Higher Decoding Throughput ([blog](https://lmsys.org/blog/2025-06-16-gb200-part-1/)).
-- [2025/05] Deploying DeepSeek with PD Disaggregation and Large-scale Expert Parallelism on 96 H100 GPUs ([blog](https://lmsys.org/blog/2025-05-05-large-scale-ep/)).
-- [2025/03] Supercharge DeepSeek-R1 Inference on AMD Instinct MI300X ([AMD blog](https://rocm.blogs.amd.com/artificial-intelligence/DeepSeekR1-Part2/README.html))
-- [2025/03] SGLang Joins PyTorch Ecosystem: Efficient LLM Serving Engine ([PyTorch blog](https://pytorch.org/blog/sglang-joins-pytorch/))
-- [2025/02] Unlock DeepSeek-R1 Inference Performance on AMD Instinct™ MI300X GPU ([AMD blog](https://rocm.blogs.amd.com/artificial-intelligence/DeepSeekR1_Perf/README.html))
-- [2025/01] SGLang provides day one support for DeepSeek V3/R1 models on NVIDIA and AMD GPUs with DeepSeek-specific optimizations. ([instructions](https://github.com/sgl-project/sglang/tree/main/benchmark/deepseek_v3), [AMD blog](https://www.amd.com/en/developer/resources/technical-articles/amd-instinct-gpus-power-deepseek-v3-revolutionizing-ai-development-with-sglang.html), [10+ other companies](https://x.com/lmsysorg/status/1887262321636221412))
-- [2024/12] v0.4 Release: Zero-Overhead Batch Scheduler, Cache-Aware Load Balancer, Faster Structured Outputs ([blog](https://lmsys.org/blog/2024-12-04-sglang-v0-4/)).
-- [2024/10] The First SGLang Online Meetup ([slides](https://github.com/sgl-project/sgl-learning-materials?tab=readme-ov-file#the-first-sglang-online-meetup)).
-- [2024/09] v0.3 Release: 7x Faster DeepSeek MLA, 1.5x Faster torch.compile, Multi-Image/Video LLaVA-OneVision ([blog](https://lmsys.org/blog/2024-09-04-sglang-v0-3/)).
-- [2024/07] v0.2 Release: Faster Llama3 Serving with SGLang Runtime (vs. TensorRT-LLM, vLLM) ([blog](https://lmsys.org/blog/2024-07-25-sglang-llama3/)).
-- [2024/02] SGLang enables **3x faster JSON decoding** with compressed finite state machine ([blog](https://lmsys.org/blog/2024-02-05-compressed-fsm/)).
-- [2024/01] SGLang provides up to **5x faster inference** with RadixAttention ([blog](https://lmsys.org/blog/2024-01-17-sglang/)).
-- [2024/01] SGLang powers the serving of the official **LLaVA v1.6** release demo ([usage](https://github.com/haotian-liu/LLaVA?tab=readme-ov-file#demo)).
+1. **Commit reorganization:** the appliance changes were reworked into small, independently reviewable commits instead of preserving the original monolithic history.
+2. **Upstream rebase:** the stack is rebased onto the current `xiongyw/main` tip at the time of publication, while retaining the appliance commits on top.
+3. **Narrowed target:** the supported scope is explicitly the two-card RX 7900 XTX TP=2/PP=1 Qwen3.8-27B W4A16 appliance. TP=1 and PP=2 experiments are historical evidence, not supported branch targets.
 
-</details>
+The active branch name is:
 
-## About
-SGLang is a high-performance serving framework for large language models and multimodal models.
-It is designed to deliver low-latency and high-throughput inference across a wide range of setups, from a single GPU to large distributed clusters.
-Its core features include:
+```text
+7900xtx-qwen38-27b-tp2pp1
+```
 
-- **Fast Runtime**: Provides efficient serving with RadixAttention for prefix caching, a zero-overhead CPU scheduler, prefill-decode disaggregation, speculative decoding, continuous batching, paged attention, tensor/pipeline/expert/data parallelism, structured outputs, chunked prefill, quantization (FP4/FP8/INT4/AWQ/GPTQ), and multi-LoRA batching.
-- **Broad Model Support**: Supports a wide range of language models (Llama, Qwen, DeepSeek, Kimi, GLM, GPT, Gemma, Mistral, etc.), embedding models (e5-mistral, gte, mcdse), reward models (Skywork), and diffusion models (WAN, Qwen-Image), with easy extensibility for adding new models. Compatible with most Hugging Face models and OpenAI APIs.
-- **Extensive Hardware Support**: Runs on NVIDIA GPUs (GB200/B300/H100/A100/Spark/5090), AMD GPUs (MI355/MI300), Intel Xeon CPUs, Google TPUs, Ascend NPUs, and more.
-- **Active Community**: SGLang is open-source and supported by a vibrant community with widespread industry adoption, powering over 400,000 GPUs worldwide.
-- **RL & Post-Training Backbone**: SGLang is a proven rollout backend used for training many frontier models, with native RL integrations and adoption by well-known post-training frameworks such as [**AReaL**](https://github.com/inclusionAI/AReaL), [**Miles**](https://github.com/radixark/miles), [**slime**](https://github.com/THUDM/slime), [**Tunix**](https://github.com/google/tunix), [**verl**](https://github.com/volcengine/verl) and more.
+## What is included
 
-## Getting Started
-- [Install SGLang](https://docs.sglang.io/get_started/install.html)
-- [Quick Start](https://docs.sglang.io/basic_usage/send_request.html)
-- [Cookbook](https://docs.sglang.io/cookbook) — the deployment command we recommend for each supported model
-- [Backend Tutorial](https://docs.sglang.io/basic_usage/openai_api_completions.html)
-- [Frontend Tutorial](https://docs.sglang.io/references/frontend/frontend_tutorial.html)
-- [Contribution Guide](https://docs.sglang.io/developer_guide/contribution_guide.html)
+- gfx1100 AOT build and RDNA3 W4A16 GPTQ GEMM support.
+- Qwen3.8-27B AutoRound GPTQ checkpoint loading, including TP-aware `g_idx` validation.
+- TP=2/PP=1 DFlash2 support on the hybrid GDN/Mamba target.
+- Correctness fixes for the packed W4A16 DFlash2 drafter:
+  - GPTQ zero-point convention;
+  - BF16 activation range preservation in RDNA3 W4A16 kernels;
+  - quantized DFlash context projection loading.
+- Decode CUDA graphs for the production batch-1 profile.
+- Exact-target gfx1100 split-KV verify admission for the Qwen3.8 geometry.
+- Guarded fused context-KV materialization for the packed W4A16 DFlash2 QKV layout.
+- Custom all-reduce support and correctness tests, while the measured production recipe retains NCCL/RCCL.
 
-## Benchmark and Performance
-Learn more in the release blogs: [v0.2 blog](https://lmsys.org/blog/2024-07-25-sglang-llama3/), [v0.3 blog](https://lmsys.org/blog/2024-09-04-sglang-v0-3/), [v0.4 blog](https://lmsys.org/blog/2024-12-04-sglang-v0-4/), [Large-scale expert parallelism](https://lmsys.org/blog/2025-05-05-large-scale-ep/), [GB200 rack-scale parallelism](https://lmsys.org/blog/2025-09-25-gb200-part-2/), [GB300 long context](https://lmsys.org/blog/2026-02-19-gb300-longctx/).
+The current HEAD is the fused-KV commit. DSpark exploration, HIP DFlash fast-path restoration, and further hardware-dependent tuning remain separate backlog items.
 
-## Adoption and Sponsorship
-SGLang has been deployed at large scale, generating trillions of tokens in production each day. It is trusted and adopted by a wide range of leading enterprises and institutions, including xAI, NVIDIA, AMD, Intel, LinkedIn, Cursor, Oracle Cloud, Google Cloud, Microsoft Azure, AWS, Atlas Cloud, Voltage Park, Nebius, DataCrunch, Novita, RunPod, InnoMatrix, Modal, MIT, UCLA, the University of Washington, Stanford, UC Berkeley, Tsinghua University, Baseten, Baidu, AntGroup, Alibaba, Tencent, and other major technology organizations.
-As an open-source LLM inference engine, SGLang has become the de facto industry standard, with deployments running on over 400,000 GPUs worldwide.
-SGLang is currently hosted under the non-profit open-source organization [LMSYS](https://lmsys.org/about/).
+## Hardware caveat: the P2P rig is not ideal
 
-<img src="https://raw.githubusercontent.com/sgl-project/sgl-learning-materials/refs/heads/main/slides/adoption.png" alt="logo" width="800" margin="10px"></img>
+The two cards currently have asymmetric PCIe links: one is Gen2 ×8 and the other is Gen3 ×8. Cross-card traffic is therefore constrained by the slower link. This is a property of the target hardware configuration, not a branch target; the link-speed cause is intentionally not investigated here.
 
-## Contact Us
-For enterprises interested in adopting or deploying SGLang at scale, including technical consulting, sponsorship opportunities, or partnership inquiries, please contact us at [sglang@lmsys.org](mailto:sglang@lmsys.org).
+Consequences:
 
-Long-term active SGLang contributors are eligible for coding agent sponsorship, such as Cursor, Claude Code, or OpenAI Codex. Email [sglang@lmsys.org](mailto:sglang@lmsys.org) with your most important commits or pull requests.
+- TP=2 correctness is validated, but performance numbers are specific to this topology.
+- Prefill and communication-sensitive measurements may improve after the slower card is retrained to Gen3 ×8.
+- Do not compare these numbers directly with a symmetric PCIe or NVLink system.
+- HIP peer access is required and was verified for the target topology in both directions.
 
-## Acknowledgment
-We learned the design and reused code from the following projects: [Guidance](https://github.com/guidance-ai/guidance), [vLLM](https://github.com/vllm-project/vllm), [LightLLM](https://github.com/ModelTC/lightllm), [FlashInfer](https://github.com/flashinfer-ai/flashinfer), [Outlines](https://github.com/outlines-dev/outlines), and [LMQL](https://github.com/eth-sri/lmql).
+## Measured results
+
+Measurements below are from the real Qwen3.8-27B W4A16 target and TP=2/PP=1 DFlash2 drafter on this two-card rig. They are decode-only medians from five-run controls unless noted otherwise; graphs were enabled for the production profile.
+
+### Production profile: batch 1, short context
+
+```text
+Profile                         Median decode       Result
+Target-only, graphs on           38.459 tok/s       control
+DFlash2 W4A16, graphs on        129.096 tok/s       3.36× target-only
+```
+
+Acceptance remained nonzero and outputs matched the target-only greedy control in the correctness probes.
+
+### Long-context curve: graphs on
+
+```text
+Prompt depth       Target-only       DFlash2       DFlash2 advantage
+~1.6K                 38.459          129.096          3.36×
+~8.5K                 37.563           92.973          2.48×
+~32K                  33.616           46.503          1.38×
+~200K                   —              ~33 tok/s       measured envelope
+```
+
+Acceptance stayed approximately constant through the depth curve; the decline is per-step verification cost, not draft acceptance collapse. The branch's split-KV verify port restores much of the long-context loss: the measured ~32K speculative profile reached approximately 85 tok/s in a later control, but compare only runs with identical harness settings when drawing a final number.
+
+### Fused context-KV A/B
+
+```text
+Context       Fused path       Sequential fallback       Delta
+~8.5K           114.505             114.353              +0.13%
+~32K             90.484              90.304              +0.20%
+```
+
+The fused path is retained as a guarded correctness-preserving enablement. These measurements do not establish an end-to-end throughput win on this workload.
+
+### Concurrency
+
+At ~8.5K context and four submitted sessions, DFlash2 reached approximately 239 tok/s aggregate versus approximately 123 tok/s target-only. At ~32K, the scheduler admitted only three sessions concurrently; the run was capacity/scheduling-limited.
+
+These results are appliance measurements, not performance guarantees.
+
+## Setup and installation
+
+The commands below assume Debian/Linux, ROCm 7.2.4, Python 3.12, and a user-provided installation layout. Set these variables to match your machine before running the commands:
+
+```bash
+export SGLANG_DIR="${SGLANG_DIR:-$PWD}"
+export VENV_DIR="${VENV_DIR:-$HOME/venv/sglang}"
+export TARGET_MODEL="${TARGET_MODEL:-$HOME/models/safetensors/Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ}"
+export DRAFT_MODEL="${DRAFT_MODEL:-$HOME/models/safetensors/syvai/Qwen3.8-27B-DFlash2-W4A16}"
+export SETUP_DIR="${SETUP_DIR:-$HOME/sglang-setup}"
+export PYTHON="${PYTHON:-$VENV_DIR/bin/python}"
+export LAUNCH_SCRIPT="${LAUNCH_SCRIPT:-$SETUP_DIR/launch_tp2_dflash_8080.sh}"
+```
+
+Use equivalent checkpoint paths if your models are stored elsewhere. The commands below use these variables rather than assuming a particular username or home-directory layout.
+
+### 1. Preflight
+
+```bash
+rocminfo | grep -E 'Name:|gfx'
+hipconfig --version
+readlink -f /opt/rocm
+
+$PYTHON -c \
+  'import torch; print(torch.__version__, torch.version.hip, torch.cuda.device_count())'
+```
+
+Expected reference values:
+
+```text
+gfx1100
+ROCm 7.2.4
+2.11.0+rocm7.2 7.2.26015 2
+```
+
+Do not run `rocm-smi --gpureset` on these gfx1100 cards; it has previously been observed to lock the PCIe root port.
+
+### 2. Preserve ROCm Torch and install SGLang without dependency replacement
+
+```bash
+source "$VENV_DIR/bin/activate"
+cd "$SGLANG_DIR/python"
+
+SGLANG_BUILD_RUST_EXTS=none \
+  uv pip install --no-build-isolation --no-deps -e .
+
+python -c \
+  'import torch, sglang; print(torch.__version__, torch.version.hip); print(sglang.__file__)'
+```
+
+Do not use a dependency-resolving install that can replace the ROCm Torch build with CUDA Torch. Install missing Python imports individually if the launcher reports them.
+
+### 3. Build gfx1100 AOT kernels
+
+```bash
+source "$VENV_DIR/bin/activate"
+cd "$SGLANG_DIR/python/sglang/kernels/aot"
+
+PYTORCH_ROCM_ARCH=gfx1100 \
+  "$PYTHON" setup_rocm.py build_ext --inplace
+
+DEST="$VIRTUAL_ENV/lib/python$(python -c \
+  'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')/site-packages/sgl_kernel"
+mkdir -p "$DEST"
+cp -a python/sgl_kernel/. "$DEST/"
+
+python -c 'import sgl_kernel, sgl_kernel.allreduce; print("sgl_kernel OK")'
+```
+
+The full `python/sgl_kernel/` package must be copied, not only the shared object.
+
+### 4. Verify the target and drafter paths
+
+```bash
+test -f "$TARGET_MODEL/config.json"
+test -f "$DRAFT_MODEL/config.json"
+```
+
+The W4A16 DFlash2 alternative requires a different explicit drafter quantization setting and is not the default production recipe.
+
+### 5. Keep the target MTP tensors in BF16
+
+The target checkpoint stores its MTP tensors as BF16, while the original checkpoint metadata contains positive GPTQ rules matching `mtp.*`. A fresh copy of the target checkpoint must have those MTP rules replaced with one negative BF16 exclusion rule before serving.
+
+This patch is idempotent and changes only the target `config.json`; it does not modify model weights:
+
+```bash
+export TARGET_MODEL="${TARGET_MODEL:-$HOME/models/safetensors/Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ}"
+$PYTHON - <<'PY'
+import json
+import os
+
+path = os.path.join(os.environ["TARGET_MODEL"], "config.json")
+with open(path, encoding="utf-8") as f:
+    config = json.load(f)
+
+quant = config.setdefault("quantization_config", {})
+dynamic = quant.setdefault("dynamic", {})
+for key in list(dynamic):
+    if "mtp" in key.lower():
+        del dynamic[key]
+dynamic["-:.*mtp.*"] = {"bits": 16, "group_size": 128}
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(config, f, indent=2)
+    f.write("\n")
+print(f"patched {path}")
+PY
+```
+
+Verify the patch before starting the server:
+
+```bash
+$PYTHON - <<'PY'
+import json
+import os
+
+path = os.path.join(os.environ["TARGET_MODEL"], "config.json")
+config = json.load(open(path, encoding="utf-8"))
+dynamic = config["quantization_config"]["dynamic"]
+mtp = {k: v for k, v in dynamic.items() if "mtp" in k.lower()}
+assert mtp == {"-:.*mtp.*": {"bits": 16, "group_size": 128}}, mtp
+assert not any(k.startswith("+:") for k in mtp), mtp
+print("MTP BF16 exclusion verified:", mtp)
+PY
+```
+
+The branch also contains a loader-side safeguard for the GPTQ/AutoRound quantization names, but the checkpoint metadata patch is part of reproducing the validated local setup and should be applied to a fresh target download.
+
+## Start and stop the appliance
+
+The repository includes the tested launcher:
+
+```text
+$LAUNCH_SCRIPT
+```
+
+Start on all host interfaces, port 8080:
+
+```bash
+"$LAUNCH_SCRIPT"
+```
+
+The script launches TP=2/PP=1 with:
+
+```text
+host:                 0.0.0.0
+port:                 8080
+context length:       262144
+mem fraction:         0.90
+decode CUDA graph:    batch size 1
+attention backend:    triton
+verify KV splits:     16
+chunked prefill:      2048
+reasoning parser:     qwen3
+tool-call parser:     qwen3_coder
+DFlash2 drafter:      W4A16 compressed-tensors
+```
+
+Check the API from another machine on the LAN:
+
+```bash
+curl http://<host-ip>:8080/v1/models
+curl http://<host-ip>:8080/health
+```
+
+Stop only the server owning port 8080:
+
+```bash
+"$LAUNCH_SCRIPT" --kill
+```
+
+The script refuses to overwrite an occupied port during launch and kills the owning process group only when `--kill` is explicitly requested.
+
+## Validation checklist
+
+Before trusting a new build or rebase:
+
+```bash
+cd "$SGLANG_DIR"
+
+$PYTHON -m py_compile \
+  python/sglang/srt/speculative/dflash_utils.py \
+  python/sglang/srt/speculative/dflash_worker_v2.py \
+  python/sglang/srt/models/dflash.py \
+  python/sglang/srt/models/dspark.py \
+  python/sglang/kernels/ops/speculative/fused_kv_materialize.py \
+  python/sglang/srt/layers/attention/triton_backend.py
+
+$PYTHON -m unittest \
+  test.registered.unit.spec.test_dflash_fused_kv_quant \
+  test.registered.unit.spec.test_dflash_hip_admission \
+  test.registered.unit.spec.test_dflash_hip_accept_policy \
+  test.registered.unit.spec.test_dflash_hip_greedy_accept \
+  test.registered.unit.spec.test_dflash_hip_prepare_policy \
+  test.registered.unit.spec.test_dflash_hip_selector_policy \
+  test.registered.unit.test_7900xtx_gptq_identity_gidx \
+  test.registered.unit.test_7900xtx_gptq_dispatch \
+  test.registered.unit.test_7900xtx_gptq_adapter
+```
+
+The reference sanity run after rebasing onto `xiongyw/main` passed 25/25 tests. A real appliance validation should also confirm:
+
+- both TP ranks initialize;
+- `/health` and `/v1/models` return 200;
+- logs show target-verify and draft CUDA graph capture;
+- logs show `reasoning_parser=qwen3` and `tool_call_parser=qwen3_coder` in `server_args`;
+- a tool-enabled request returns structured `tool_calls`, not raw `<tool_call>` text;
+- greedy output matches the no-drafter control on the fixed probe set.
+
+## References
+
+- Original gfx1100 support: https://github.com/StevenChenSE/sglang/tree/gfx1100-support
+- Official upstream: https://github.com/sgl-project/sglang
+- DFlash2 model: https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2
