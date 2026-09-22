@@ -254,6 +254,7 @@ class FusedKVMaterializeHelper:
         head_dim: int,
         device: torch.device,
         max_position_hint: Optional[int] = None,
+        kv_weights_override: Optional[List[torch.Tensor]] = None,
     ):
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
@@ -319,8 +320,26 @@ class FusedKVMaterializeHelper:
                     f"got (rotary_dim={layer_rotary_dim}, neox={layer_is_neox}) at layer {layer_id}."
                 )
 
-            qkv_w = attn.qkv_proj.weight
-            kv_weight = qkv_w[attn.q_size : attn.q_size + 2 * attn.kv_size]
+            if kv_weights_override is not None:
+                if layer_id >= len(kv_weights_override):
+                    raise ValueError(
+                        "kv_weights_override is shorter than the draft layer list: "
+                        f"layer={layer_id}, entries={len(kv_weights_override)}."
+                    )
+                kv_weight = kv_weights_override[layer_id]
+                if (
+                    not isinstance(kv_weight, torch.Tensor)
+                    or kv_weight.ndim != 2
+                    or tuple(kv_weight.shape) != (2 * int(attn.kv_size), int(attn.qkv_proj.input_size))
+                ):
+                    raise ValueError(
+                        "kv_weights_override entry has invalid shape: "
+                        f"layer={layer_id}, got={getattr(kv_weight, 'shape', None)}, "
+                        f"expected={(2 * int(attn.kv_size), int(attn.qkv_proj.input_size))}."
+                    )
+            else:
+                qkv_w = attn.qkv_proj.weight
+                kv_weight = qkv_w[attn.q_size : attn.q_size + 2 * attn.kv_size]
             kv_weights.append(kv_weight)
             k_norm_weights.append(attn.k_norm.weight)
             eps_values.append(float(attn.k_norm.variance_epsilon))

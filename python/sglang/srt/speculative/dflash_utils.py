@@ -11,6 +11,12 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors import (
+    CompressedTensorsLinearMethod,
+)
+from sglang.srt.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (
+    CompressedTensorsWNA16,
+)
 from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
 from sglang.srt.layers.sampler import (
     apply_custom_logit_processor,
@@ -857,13 +863,125 @@ def can_dflash_slice_qkv_weight(qkv_proj: Any) -> Tuple[bool, str]:
 
 
 def can_dflash_use_fused_qkv_proj(qkv_proj: Any) -> Tuple[bool, str]:
-    """Validate whether a QKV layer is eligible for DFlash fused KV materialization."""
+    """Validate whether a dense QKV layer can feed fused KV materialization."""
     eligible, reason = can_dflash_slice_qkv_weight(qkv_proj)
     if not eligible:
         return False, reason
     if getattr(qkv_proj, "bias", None) is not None:
         return False, "qkv bias is not supported for fused KV path"
     return True, ""
+
+
+def can_dflash_dequant_fused_qkv_proj(qkv_proj: Any) -> Tuple[bool, str]:
+    """Validate the exact RDNA3 compressed-tensors W4A16 QKV layout."""
+    quant_method = getattr(qkv_proj, "quant_method", None)
+    if not isinstance(quant_method, CompressedTensorsLinearMethod):
+        return False, "qkv quant_method is not CompressedTensorsLinearMethod"
+    scheme = getattr(qkv_proj, "scheme", None)
+    if not isinstance(scheme, CompressedTensorsWNA16):
+        return False, "qkv scheme is not CompressedTensorsWNA16"
+    if not bool(getattr(scheme, "symmetric", False)):
+        return False, "qkv scheme is not symmetric W4A16"
+    if int(getattr(scheme, "pack_factor", 0)) != 8:
+        return False, "qkv scheme is not 4-bit packed W4A16"
+    if int(getattr(scheme, "group_size", 0)) != 128:
+        return False, "qkv scheme group_size is not 128"
+    for name in (
+        "weight_packed",
+        "weight_scale",
+        "weight_zero_point",
+        "weight_shape",
+        "weight_g_idx",
+    ):
+        if getattr(qkv_proj, name, None) is None:
+            return (
+                False,
+                f"quantized qkv_proj lacks {name} "
+                f"(quant_method={type(getattr(qkv_proj, 'quant_method', None)).__name__})",
+            )
+    weight_shape = qkv_proj.weight_shape
+    w_q = qkv_proj.weight_packed
+    w_s = qkv_proj.weight_scale
+    w_zp = qkv_proj.weight_zero_point
+    g_idx = qkv_proj.weight_g_idx
+    if not isinstance(weight_shape, torch.Tensor) or weight_shape.ndim != 1 or weight_shape.numel() != 2:
+        return False, "qkv weight_shape must be a length-2 tensor"
+    if weight_shape.dtype != torch.int64:
+        return False, "qkv weight_shape must be int64"
+    if w_q.dtype != torch.int32 or w_q.ndim != 2:
+        return False, "qkv weight_packed must be a 2D int32 tensor"
+    if w_s.ndim != 2 or w_s.dtype not in (torch.float16, torch.bfloat16):
+        return False, "qkv weight_scale must be a 2D fp16/bf16 tensor"
+    if w_zp.dtype != torch.int32 or w_zp.ndim != 2:
+        return False, "qkv weight_zero_point must be a 2D int32 tensor"
+    if g_idx.dtype != torch.int32 or g_idx.ndim != 1 or g_idx.numel() != 0:
+        return False, "qkv weight_g_idx must be an empty int32 tensor"
+    logical_k, logical_n = (int(weight_shape[0]), int(weight_shape[1]))
+    if logical_k <= 0 or logical_n != int(w_q.shape[1]):
+        return False, "qkv weight_shape does not match packed output width"
+    if logical_k != int(w_q.shape[0]) * int(scheme.pack_factor):
+        return False, "qkv weight_shape does not match packed input rows"
+    groups = logical_k // int(scheme.group_size)
+    if tuple(w_s.shape) != (logical_n, groups):
+        return False, "qkv weight_scale shape does not match W4A16 metadata"
+    if tuple(w_zp.shape) != (logical_n // int(scheme.pack_factor), groups):
+        return False, "qkv weight_zero_point shape does not match W4A16 metadata"
+    if getattr(qkv_proj, "bias", None) is not None:
+        return False, "qkv bias is not supported for fused KV path"
+    return True, ""
+
+
+def dequantize_gptq_kv_rows(
+    qkv_proj: Any,
+    q_size: int,
+    kv_size: int,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Recover dense K/V rows from the packed RDNA3 GPTQ QKV layer.
+
+    The RDNA3 GPTQ kernel already owns the packed/shuffled layout. A one-hot
+    input therefore returns the dense dequantized QKV matrix without duplicating
+    nibble-shuffle logic in Python. This is initialization-only work.
+    """
+    from sglang.srt.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (
+        RDNA3_COMPRESSED_TENSORS_V2_ZERO_OFFSET,
+    )
+
+    from sgl_kernel import common_ops  # noqa: F401
+
+    w_q = qkv_proj.weight_packed
+    weight_shape = qkv_proj.weight_shape
+    in_features = int(weight_shape[1])
+    out_features = int(w_q.shape[1])
+    expected_out = int(q_size) + 2 * int(kv_size)
+    if out_features != expected_out:
+        raise ValueError(
+            "qkv packed weight width mismatch: "
+            f"expected {expected_out}, got {out_features}."
+        )
+    packed_rows = int(w_q.shape[0])
+    if packed_rows <= 0 or in_features % packed_rows != 0:
+        raise ValueError(
+            "qkv packed weight shape is inconsistent with weight_shape: "
+            f"packed={tuple(w_q.shape)}, logical_shape={tuple(weight_shape.tolist())}."
+        )
+    num_bits = int(round(packed_rows * 32 / in_features))
+    if num_bits not in (4, 8) or in_features != packed_rows * (32 // num_bits):
+        raise ValueError(
+            "unsupported qkv GPTQ packing: "
+            f"packed={tuple(w_q.shape)}, logical_in_features={in_features}."
+        )
+
+    eye = torch.eye(in_features, dtype=out_dtype, device=w_q.device)
+    dense_qkv = torch.ops.sgl_kernel.gptq_gemm_rdna3(
+        eye,
+        w_q,
+        qkv_proj.weight_zero_point,
+        qkv_proj.weight_scale,
+        qkv_proj.weight_g_idx,
+        RDNA3_COMPRESSED_TENSORS_V2_ZERO_OFFSET,
+    )
+    return dense_qkv[:, int(q_size) : expected_out].transpose(0, 1).contiguous()
 
 
 def _dflash_triton_greedy_accept_supported(*, is_hip: bool) -> bool:
