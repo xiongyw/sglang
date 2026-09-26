@@ -17,6 +17,7 @@ from sglang.srt.mem_cache.kvmem_registry import (
     KVMemRegistryConfig,
     KVMemRequestRegistry,
 )
+from sglang.srt.model_executor.runner import get_is_capture_mode
 
 
 @dataclass(frozen=True)
@@ -113,3 +114,66 @@ def rollback_attention_k(*, layer_id: int) -> bool:
         return False
     get_kvmem_registry().rollback_batch(layer_id=layer_id)
     return True
+
+
+def _per_row_request_ids(forward_batch) -> Optional[list[str]]:
+    """Derive one request id per K row, or None when it cannot be exact.
+
+    Exact cases: decode with rids matching batch rows; extend with host-side
+    start locations. Inexact cases (CUDA-graph capture/replay padding, missing
+    rids, mismatched counts) return None so the caller skips capture.
+    """
+    if get_is_capture_mode():
+        return None
+    rids = getattr(forward_batch, "rids", None)
+    if not rids:
+        return None
+    mode = forward_batch.forward_mode
+    n_rows = int(forward_batch.seq_lens.shape[0])
+    if mode.is_decode():
+        if len(rids) != n_rows or (forward_batch.positions is None):
+            return None
+        if forward_batch.positions.shape[0] != n_rows:
+            return None
+        return list(rids)
+    if mode.is_extend():
+        start_loc = forward_batch.extend_start_loc
+        seq_lens_cpu = forward_batch.extend_seq_lens_cpu
+        if start_loc is None or seq_lens_cpu is None:
+            return None
+        if len(rids) != len(seq_lens_cpu):
+            return None
+        starts = start_loc[: len(seq_lens_cpu)].tolist()
+        row_ids: list[str] = []
+        for request_id, start, length in zip(rids, starts, seq_lens_cpu):
+            row_ids.extend([request_id] * int(length))
+        positions = forward_batch.positions
+        if positions is None or positions.shape[0] != len(row_ids):
+            return None
+        return row_ids
+    return None
+
+
+def maybe_capture_self_attention(
+    *,
+    layer_id: int,
+    key: torch.Tensor,
+    forward_batch,
+) -> bool:
+    """Stage current K rows when the row<->request mapping is exact.
+
+    No-op (returns False) when the hook is disabled or when the mapping
+    cannot be derived exactly (graph capture/replay, padded batches,
+    speculative modes without exact metadata).
+    """
+    if not hook_enabled():
+        return False
+    request_ids = _per_row_request_ids(forward_batch)
+    if request_ids is None or key.shape[0] != len(request_ids):
+        return False
+    return capture_attention_k(
+        layer_id=layer_id,
+        key=key,
+        positions=forward_batch.positions,
+        request_ids=request_ids,
+    )
