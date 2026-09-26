@@ -99,6 +99,29 @@ At ~8.5K context and four submitted sessions, DFlash2 reached approximately 239 
 
 These results are appliance measurements, not performance guarantees.
 
+### TP scaling and the drafter's depth limit
+
+Measured 2026-09-26 on `7900xtx-qwen38-27b-tp2pp1` at `b691c69a9f`, same filler-log prompt, greedy, 96 forced tokens, median of four warm runs, no concurrency.
+
+```text
+Target-only decode, ~25k prompt tokens
+  TP=2                 34.05 tok/s      29.36 ms/step
+  TP=1                 25.95 tok/s      38.53 ms/step
+  speedup 1.31x against an ideal 2.0x, leaving ~10.1 ms per step
+  that split compute does not explain
+
+Speculative vs plain at the same prompts
+  depth        target-only     DFlash2 w512    DFlash2 no window flag
+  ~25k         34.05           45.45           28.24
+  ~115k        24.19           17.07           16.31
+```
+
+Three qualifications follow, and they bound where the drafter is worth using.
+
+1. The drafter's advantage is confined to shallow and medium depth. At ~115k the target-only path is 29-33% faster than every speculative setting measured, and it is not a window problem: windows of 512, 1024, 2048 and 4096 all land within 4.7% of each other at ~119.5-120.2 ms per step, with acceptance 1.50-2.35 against the 2.89 tokens per step that a 115k speculative step needs to break even.
+2. The ~200K envelope of roughly 33 tok/s is not reproduced under this harness: the best speculative arm at ~115k measured 17.07 tok/s. Treat that envelope as unreproduced until a matching configuration is identified.
+3. Greedy output is not bit-reproducible across server restarts on this build. A target-only continuation was compared with itself across two restarts and diverged at token 48 of 96, while the two speculative runs were identical. The claim above that outputs matched the target-only greedy control therefore holds only up to the first divergence, and any bit-identity check needs repeats rather than a single agreeing run.
+
 ## Setup and installation
 
 The commands below assume Debian/Linux, ROCm 7.2.4, Python 3.12, and a user-provided installation layout. Set these variables to match your machine before running the commands:
@@ -230,7 +253,7 @@ The branch also contains a loader-side safeguard for the GPTQ/AutoRound quantiza
 
 ## Start and stop the appliance
 
-The repository includes the tested launcher:
+The repository does not contain the launcher; it lives in the setup directory described above:
 
 ```text
 $LAUNCH_SCRIPT
@@ -256,7 +279,11 @@ chunked prefill:      2048
 reasoning parser:     qwen3
 tool-call parser:     qwen3_coder
 DFlash2 drafter:      W4A16 compressed-tensors
+draft tokens/block:   8 / 8
+draft window:         512 (compact draft cache)
 ```
+
+The draft window line is load-bearing for the measurements below. `--speculative-draft-window-size` defaults to unset, and `dflash_worker_v2.py` sets `use_compact_draft_cache = draft_window_size is not None`, so launching without the flag leaves the drafter attending over the full context. Measured at ~25k prompt tokens with everything else identical: 28.24 tok/s without the flag versus 45.45 tok/s with `512`, at an unchanged per-step cost (acceptance 1.50 vs 3.30). Set `SPECULATIVE_DRAFT_WINDOW=none` to restore the engine default.
 
 Check the API from another machine on the LAN:
 
