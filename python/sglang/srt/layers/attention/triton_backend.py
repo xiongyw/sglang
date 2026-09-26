@@ -787,6 +787,34 @@ class TritonAttnBackend(AttentionBackend):
             self._fill_cuda_graph_write_locs(forward_batch, bs)
             self._fill_cuda_graph_swa_out_cache_loc(forward_batch)
 
+            # KVMem: this runs on the host every replay for replay-driven
+            # metadata, so a recorded selection can bound what the graph-replayed
+            # attention reads. The buffers are compacted in place because the
+            # captured graph holds their addresses. Opt-in and a no-op without a
+            # budget-limited selection.
+            if os.environ.get("SGLANG_KVMEM_APPLY") not in (None, "", "0", "false"):
+                from sglang.srt.mem_cache.kvmem_apply import (
+                    compact_kv_indices_inplace,
+                    plan_keep_positions_for_batch,
+                )
+
+                metadata = self.forward_metadata
+                if (
+                    metadata is not None
+                    and metadata.kv_indptr is not None
+                    and metadata.kv_indices is not None
+                ):
+                    keep_lists = plan_keep_positions_for_batch(
+                        forward_batch, metadata.kv_indptr
+                    )
+                    if keep_lists is not None:
+                        compact_kv_indices_inplace(
+                            forward_batch,
+                            metadata.kv_indptr,
+                            metadata.kv_indices,
+                            keep_lists,
+                        )
+
     def _fill_cuda_graph_swa_out_cache_loc(
         self, forward_batch: ForwardBatch, in_capture: bool = False
     ) -> Optional[torch.Tensor]:

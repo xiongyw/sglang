@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 _APPROX_SINK_BLOCKS = 1
 _APPROX_RECENT_BLOCKS = 2
 _apply_calls = 0
+_compact_calls = 0
 _last_report = {"history": 0, "kept": 0}
 
 
@@ -121,6 +122,157 @@ def _history_lens(indptr) -> str:
     return str([int(values[i + 1] - values[i]) for i in range(len(values) - 1)])
 
 
+def plan_keep_positions_for_batch(
+    forward_batch, kv_indptr
+) -> Optional[list[Optional[Sequence[int]]]]:
+    """Per-request keep positions for the batch, or None when nothing applies.
+
+    Shared policy for both application paths: every request's history length
+    comes from ``kv_indptr``, and only a budget-limited selection is used --
+    a selection that was not cut when it was made wanted every block it scored,
+    and the history has grown since, so applying it would drop unscored blocks.
+    """
+    if not hook_enabled() or not apply_enabled():
+        return None
+    if _capture_in_progress():
+        return None
+    req_pool_indices = getattr(forward_batch, "req_pool_indices", None)
+    if req_pool_indices is None or kv_indptr is None:
+        return None
+    batch_size = int(getattr(forward_batch, "batch_size", 0))
+    if batch_size <= 0 or int(kv_indptr.shape[0]) < batch_size + 1:
+        return None
+
+    registry = get_kvmem_registry()
+    block_size = int(registry.config.block_size)
+    keep_lists: list[Optional[Sequence[int]]] = []
+    for index in range(batch_size):
+        history_len = int(kv_indptr[index + 1]) - int(kv_indptr[index])
+        if history_len <= 0:
+            # Nothing to bound yet (e.g. the first prefill chunk): leave it.
+            keep_lists.append(None)
+            continue
+        slot = int(req_pool_indices[index])
+        recorded = registry.last_selection(f"slot:{slot}")
+        if recorded is None:
+            keep_lists.append(None)
+            continue
+        selected, budget_limited = recorded
+        if not budget_limited:
+            keep_lists.append(None)
+            continue
+        keep_lists.append(
+            keep_positions_for_history(
+                history_len,
+                block_size,
+                selected,
+                sink_blocks=_APPROX_SINK_BLOCKS,
+                recent_blocks=_APPROX_RECENT_BLOCKS,
+            )
+        )
+    if all(keep is None for keep in keep_lists):
+        return None
+    return keep_lists
+
+
+def compact_kv_indices_inplace(
+    forward_batch,
+    kv_indptr: torch.Tensor,
+    kv_indices: torch.Tensor,
+    keep_lists: Sequence[Optional[Sequence[int]]],
+) -> Optional[tuple[int, int]]:
+    """Shrink the KV index buffers in place; returns ``(kept, history)``.
+
+    Graph-replayed steps own these buffers: the captured graph holds their
+    addresses and the attention kernel reads ``kv_indices[kv_indptr[i]:
+    kv_indptr[i+1]]``, so the compaction must write *into* the buffers instead of
+    replacing the tensors. Kept slots are gathered on the device (only the keep
+    index list crosses from the host), so the cost does not scale with the
+    history length.
+    """
+    if not hook_enabled() or not apply_enabled():
+        return None
+    if _capture_in_progress():
+        return None
+
+    batch_size = len(keep_lists)
+    if batch_size <= 0 or int(kv_indptr.shape[0]) < batch_size + 1:
+        return None
+
+    registry = get_kvmem_registry()
+    req_pool_indices = getattr(forward_batch, "req_pool_indices", None)
+    device = kv_indices.device
+    history_total = 0
+    kept_total = 0
+    lengths: list[int] = []
+    compacted: list[tuple[str, int]] = []
+    for index, keep in enumerate(keep_lists):
+        start = int(kv_indptr[index])
+        stop = int(kv_indptr[index + 1])
+        history_len = stop - start
+        history_total += history_len
+        if keep is not None and req_pool_indices is not None:
+            request_key = f"slot:{int(req_pool_indices[index])}"
+            if history_len <= registry.last_compacted_len(request_key):
+                # The buffer still holds an already-compacted list: compacting it
+                # again would shrink it a second time. Only a refill from the
+                # full history (longer than what we compacted) may be compacted.
+                keep = None
+        if keep is None:
+            lengths.append(history_len)
+            kept_total += history_len
+            continue
+        compacted.append((f"slot:{int(req_pool_indices[index])}", len(list(keep))))
+        positions = list(keep)
+        if positions:
+            if positions[-1] >= history_len or any(
+                positions[i] >= positions[i + 1] for i in range(len(positions) - 1)
+            ):
+                raise ValueError("keep positions must be ascending and within history")
+        lengths.append(len(positions))
+        kept_total += len(positions)
+
+    if kept_total == history_total:
+        return None
+
+    write_at = 0
+    for index, keep in enumerate(keep_lists):
+        start = int(kv_indptr[index])
+        stop = int(kv_indptr[index + 1])
+        count = lengths[index]
+        if keep is not None and count:
+            offsets = torch.tensor(list(keep), dtype=torch.long, device=device)
+            gathered = kv_indices[start:stop].index_select(0, offsets)
+            kv_indices[write_at : write_at + count] = gathered
+        elif keep is None and count:
+            if write_at != start:
+                kv_indices[write_at : write_at + count] = kv_indices[
+                    start:stop
+                ].clone()
+        write_at += count
+
+    cumulative = [0]
+    for length in lengths:
+        cumulative.append(cumulative[-1] + length)
+    kv_indptr[: batch_size + 1] = torch.tensor(
+        cumulative, dtype=kv_indptr.dtype, device=kv_indptr.device
+    )
+    for request_key, kept_len in compacted:
+        registry.record_compacted_len(request_key, kept_len)
+
+    global _compact_calls
+    _compact_calls += 1
+    if os.environ.get("SGLANG_KVMEM_DEBUG_APPLY"):
+        interesting = history_total >= 4 * int(registry.config.block_size)
+        if _compact_calls <= 5 or interesting or _compact_calls % 256 == 0:
+            ratio = kept_total / history_total if history_total else 1.0
+            logger.info(
+                f"KVMem compact: call={_compact_calls} bs={batch_size} "
+                f"history={history_total} kept={kept_total} ratio={ratio:.3f}"
+            )
+    return kept_total, history_total
+
+
 def maybe_apply_kvmem_selection(forward_batch, attn_backend=None):
     """Rewrite the KV index list for selected requests; returns kept/history.
 
@@ -159,6 +311,9 @@ def maybe_apply_kvmem_selection(forward_batch, attn_backend=None):
     for index in range(batch_size):
         history_len = int(kv_indptr[index + 1]) - int(kv_indptr[index])
         history_total += history_len
+        if history_len <= 0:
+            keep_lists.append(None)
+            continue
         slot = int(req_pool_indices[index])
         recorded = registry.last_selection(f"slot:{slot}")
         if recorded is None:

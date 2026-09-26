@@ -98,6 +98,17 @@ class TestApplyGating(unittest.TestCase):
             )
             self.assertEqual(backend.forward_metadata.kv_indices.tolist(), [1, 2, 3, 4])
 
+    def test_zero_history_is_skipped(self):
+        # Regression: a request whose KV window is still empty (first prefill
+        # chunk) used to reach the keep computation and raise.
+        _enable()
+        get_kvmem_registry().record_selection("slot:0", [0], budget_limited=True)
+        backend = FakeBackend([[]])
+        with mock.patch.dict(os.environ, {"SGLANG_KVMEM_APPLY": "1"}):
+            self.assertIsNone(
+                maybe_apply_kvmem_selection(FakeForwardBatch(), backend)
+            )
+
     def test_missing_backend_is_skipped(self):
         _enable()
         get_kvmem_registry().record_selection("slot:0", [0], budget_limited=True)

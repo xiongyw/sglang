@@ -37,6 +37,9 @@ class KVMemRequestRegistry:
         self._controllers: dict[str, KVMemRequestController] = {}
         self._staged: dict[tuple[str, int], int] = {}
         self._selections: dict[str, tuple[list[int], bool]] = {}
+        # Longest already-compacted history per request: the guard that stops a
+        # second compaction of a buffer that was never refilled from compounding.
+        self._compacted: dict[str, int] = {}
 
     def controller(self, request_id: str) -> KVMemRequestController:
         controller = self._controllers.get(request_id)
@@ -81,6 +84,14 @@ class KVMemRequestRegistry:
 
     def clear_selection(self, request_id: str) -> None:
         self._selections.pop(request_id, None)
+        self._compacted.pop(request_id, None)
+
+    def record_compacted_len(self, request_id: str, length: int) -> None:
+        self._compacted[request_id] = int(length)
+
+    def last_compacted_len(self, request_id: str) -> int:
+        """Longest history already compacted for this request (0 if none)."""
+        return self._compacted.get(request_id, 0)
 
     def capture_batch(self, layer_id: int, batch: KVMemCaptureBatch) -> None:
         groups = group_k_capture_rows(batch)
@@ -136,6 +147,7 @@ class KVMemRequestRegistry:
 
     def remove_request(self, request_id: str) -> None:
         self._selections.pop(request_id, None)
+        self._compacted.pop(request_id, None)
         for (rid, layer_id) in list(self._staged):
             if rid == request_id:
                 del self._staged[(rid, layer_id)]
@@ -145,3 +157,4 @@ class KVMemRequestRegistry:
         self._controllers.clear()
         self._staged.clear()
         self._selections.clear()
+        self._compacted.clear()
