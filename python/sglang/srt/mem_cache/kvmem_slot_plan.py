@@ -129,6 +129,11 @@ class KVMemPlanBuffer:
         self._indptr = torch.zeros(
             (self.max_requests + 1,), dtype=torch.int32, device=self.device
         )
+        # Per-request kept counts, kept on the device so the indptr publish does
+        # not need a host round trip.
+        self._lengths = torch.zeros(
+            (self.max_requests,), dtype=torch.int32, device=self.device
+        )
         self._pending: dict[int, list[int]] = {}
 
     def write(self, request_index: int, slots: Sequence[int]) -> None:
@@ -139,6 +144,48 @@ class KVMemPlanBuffer:
         if len(slots) > self.max_kept_tokens:
             raise ValueError("plan exceeds the buffer's per-request capacity")
         self._pending[int(request_index)] = slots
+
+    def publish_device(
+        self, plans: Sequence[tuple[torch.Tensor | None, int]]
+    ) -> int:
+        """Publish one entry per batch row, contiguously. Returns slots written.
+
+        ``plans[i]`` is ``(slots_or_None, count)``. Counts are host-known (they
+        are the length of the keep set the planner already computed), so the
+        layout offset needs no device sync; only the slot *values* come from the
+        device gather. Rows with no plan get a zero-length slice.
+        """
+        if len(plans) > self.max_requests:
+            raise ValueError("more plans than the buffer holds requests")
+        offset = 0
+        lengths: list[int] = []
+        for index, (slots, count) in enumerate(plans):
+            count = int(count)
+            if count < 0:
+                raise ValueError("slot count must not be negative")
+            if slots is not None and int(slots.numel()) != count:
+                raise ValueError("slot tensor and count disagree")
+            if offset + count > self._slots.numel():
+                raise ValueError("plans exceed the buffer capacity")
+            if count:
+                if slots is None:
+                    raise ValueError("count given without slots")
+                self._slots[offset : offset + count] = slots.to(
+                    device=self.device, dtype=self._slots.dtype
+                )
+            lengths.append(count)
+            offset += count
+
+        cumulative = [0]
+        for length in lengths:
+            cumulative.append(cumulative[-1] + length)
+        rows = len(lengths) + 1
+        self._indptr[:rows] = torch.tensor(
+            cumulative, dtype=torch.int32, device=self.device
+        )
+        if rows < self._indptr.numel():
+            self._indptr[rows:] = cumulative[-1] if cumulative else 0
+        return offset
 
     def finalize(self, batch_size: int) -> None:
         """Publish staged plans as the flat buffer plus indptr."""

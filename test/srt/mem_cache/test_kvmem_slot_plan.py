@@ -135,6 +135,39 @@ class TestPlanBuffer(unittest.TestCase):
         self.assertEqual(buffer.indptr().dtype, torch.int32)
         self.assertEqual(buffer.slots().dtype, torch.int64)
 
+    def test_device_publish_is_contiguous_across_rows(self):
+        buffer = KVMemPlanBuffer(max_requests=2, max_kept_tokens=6, device="cpu")
+        written = buffer.publish_device(
+            [
+                (torch.tensor([7, 8, 9]), 3),
+                (torch.tensor([4]), 1),
+            ]
+        )
+        self.assertEqual(written, 4)
+        self.assertEqual(buffer.indptr().tolist(), [0, 3, 4])
+        # Contiguous, i.e. row 1 starts right after row 0 (no stride padding).
+        self.assertEqual(buffer.slots()[:4].tolist(), [7, 8, 9, 4])
+
+    def test_device_publish_row_without_plan_is_zero_length(self):
+        buffer = KVMemPlanBuffer(max_requests=3, max_kept_tokens=4, device="cpu")
+        buffer.publish_device([(torch.tensor([1, 2]), 2), (None, 0)])
+        self.assertEqual(buffer.indptr().tolist(), [0, 2, 2, 2])
+
+    def test_device_publish_rejects_count_and_slots_disagreement(self):
+        buffer = KVMemPlanBuffer(max_requests=1, max_kept_tokens=4, device="cpu")
+        with self.assertRaises(ValueError):
+            buffer.publish_device([(torch.tensor([1, 2, 3]), 2)])
+
+    def test_device_publish_rejects_capacity_overflow(self):
+        buffer = KVMemPlanBuffer(max_requests=1, max_kept_tokens=2, device="cpu")
+        with self.assertRaises(ValueError):
+            buffer.publish_device([(torch.tensor([1, 2, 3]), 3)])
+
+    def test_device_publish_rejects_missing_slots_for_a_count(self):
+        buffer = KVMemPlanBuffer(max_requests=1, max_kept_tokens=4, device="cpu")
+        with self.assertRaises(ValueError):
+            buffer.publish_device([(None, 2)])
+
 
 if __name__ == "__main__":
     unittest.main()
