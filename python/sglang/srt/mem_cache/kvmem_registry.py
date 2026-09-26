@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Optional
+from typing import Mapping, Optional, Sequence
 
 import torch
 
@@ -35,6 +35,7 @@ class KVMemRequestRegistry:
         self.config = config
         self._controllers: dict[str, KVMemRequestController] = {}
         self._staged: dict[tuple[str, int], int] = {}
+        self._selections: dict[str, tuple[list[int], bool]] = {}
 
     def controller(self, request_id: str) -> KVMemRequestController:
         controller = self._controllers.get(request_id)
@@ -55,6 +56,29 @@ class KVMemRequestRegistry:
 
     def request_ids(self) -> list[str]:
         return sorted(self._controllers)
+
+    def record_selection(
+        self, request_id: str, block_ids: Sequence[int], *, budget_limited: bool
+    ) -> None:
+        """Remember the latest selection for a request.
+
+        ``budget_limited`` records whether the budget actually cut the
+        selection down: a selection that was not budget limited means the
+        selector wanted every block it scored, so it must not be used to drop
+        blocks it never saw (the history keeps growing between selection
+        passes).
+        """
+        self._selections[request_id] = (
+            [int(b) for b in block_ids],
+            bool(budget_limited),
+        )
+
+    def last_selection(self, request_id: str) -> Optional[tuple[list[int], bool]]:
+        """Last ``(block_ids, budget_limited)`` for a request, or None."""
+        return self._selections.get(request_id)
+
+    def clear_selection(self, request_id: str) -> None:
+        self._selections.pop(request_id, None)
 
     def capture_batch(self, layer_id: int, batch: KVMemCaptureBatch) -> None:
         groups = group_k_capture_rows(batch)
@@ -109,6 +133,7 @@ class KVMemRequestRegistry:
                 del self._staged[(request_id, lid)]
 
     def remove_request(self, request_id: str) -> None:
+        self._selections.pop(request_id, None)
         for (rid, layer_id) in list(self._staged):
             if rid == request_id:
                 del self._staged[(rid, layer_id)]
@@ -117,3 +142,4 @@ class KVMemRequestRegistry:
     def clear(self) -> None:
         self._controllers.clear()
         self._staged.clear()
+        self._selections.clear()

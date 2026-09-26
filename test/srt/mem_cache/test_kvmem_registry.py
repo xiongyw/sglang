@@ -64,5 +64,38 @@ class TestKVMemRequestRegistry(unittest.TestCase):
             registry.commit_batch(layer_id=0, accepted={"a": 1})
 
 
+    def test_selection_record_round_trip(self):
+        registry = KVMemRequestRegistry(
+            KVMemRegistryConfig(
+                block_size=4, max_tokens=64, selection_budget_tokens=16
+            )
+        )
+        self.assertIsNone(registry.last_selection("slot:0"))
+        registry.record_selection("slot:0", [1, 2], budget_limited=True)
+        self.assertEqual(registry.last_selection("slot:0"), ([1, 2], True))
+        registry.clear_selection("slot:0")
+        self.assertIsNone(registry.last_selection("slot:0"))
+
+    def test_remove_request_drops_selection(self):
+        registry = KVMemRequestRegistry(
+            KVMemRegistryConfig(
+                block_size=4, max_tokens=64, selection_budget_tokens=16
+            )
+        )
+        registry.record_selection("slot:0", [1], budget_limited=False)
+        registry.remove_request("slot:0")
+        self.assertIsNone(registry.last_selection("slot:0"))
+
+    def test_clear_drops_selections(self):
+        registry = KVMemRequestRegistry(
+            KVMemRegistryConfig(
+                block_size=4, max_tokens=64, selection_budget_tokens=16
+            )
+        )
+        registry.record_selection("slot:0", [1], budget_limited=True)
+        registry.clear()
+        self.assertIsNone(registry.last_selection("slot:0"))
+
+
 if __name__ == "__main__":
     unittest.main()

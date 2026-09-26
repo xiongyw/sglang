@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
@@ -1081,6 +1083,16 @@ class TritonAttnBackend(AttentionBackend):
             lean_Op=lean_Op,
             lean_locks=lean_locks,
         )
+
+        # KVMem: let a recorded selection bound the KV index list of this batch.
+        # This is the seam where the indices are known to belong to this batch;
+        # it is opt-in and a no-op unless SGLANG_KVMEM_APPLY is set.
+        if os.environ.get("SGLANG_KVMEM_APPLY") not in (None, "", "0", "false"):
+            from sglang.srt.mem_cache.kvmem_apply import (
+                maybe_apply_kvmem_selection,
+            )
+
+            maybe_apply_kvmem_selection(forward_batch, self)
 
     def init_cuda_graph_state(
         self,

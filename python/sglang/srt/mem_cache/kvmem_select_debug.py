@@ -122,6 +122,17 @@ def select_debug(
         score_list = [float(x) for x in scores]
         score_map = {block.block_id: score_list[block.block_id] for block in blocks}
         selection = selector.select(blocks, score_map)
+        # Publish for the apply path: selection only reaches attention through
+        # this record, and an absent record means "leave this request alone".
+        # A selection that is not budget-limited wanted every block it scored,
+        # so the apply path must not use it to drop blocks it never saw.
+        budget_limited = (
+            selection.total_tokens >= budget
+            and sum(block.n_tokens for block in blocks) > selection.total_tokens
+        )
+        registry.record_selection(
+            key, selection.block_ids, budget_limited=budget_limited
+        )
         results.append(
             KVMemSelectionDebug(
                 request_key=key,
