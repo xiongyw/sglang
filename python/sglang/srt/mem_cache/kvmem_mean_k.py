@@ -146,6 +146,7 @@ class KVMemDeviceMeanKAccumulator:
             (self.num_blocks,), dtype=torch.long, device=self.device
         )
         self._seen: set[int] = set()
+        self._seen_positions: torch.Tensor | None = None
 
     def update(self, key: torch.Tensor, positions: torch.Tensor) -> None:
         if key.ndim != 3 or tuple(key.shape[1:]) != (self.kv_heads, self.head_dim):
@@ -187,6 +188,73 @@ class KVMemDeviceMeanKAccumulator:
                 0, block_ids, torch.ones_like(block_ids, dtype=torch.long)
             )
         self._seen.update(positions_cpu)
+
+    def reset(self) -> None:
+        """Drop all accumulated blocks (request slot reused by a new request)."""
+        self._sum.zero_()
+        self._count.zero_()
+        self._seen = set()
+        self._seen_positions = None
+
+    def seen_any(self, positions) -> bool:
+        """True if any logical position was already accumulated."""
+        seen = self._seen_positions
+        if seen is None:
+            return False
+        return bool(seen[torch.as_tensor(list(positions), device=seen.device)].any())
+
+    def _ensure_seen_positions(self, device) -> None:
+        if self._seen_positions is None:
+            self._seen_positions = torch.zeros(
+                (self.num_blocks * self.block_size,), dtype=torch.bool, device=device
+            )
+
+    def update_idempotent(self, key: torch.Tensor, positions: torch.Tensor) -> int:
+        """Accumulate rows for positions not seen yet; return rows stored.
+
+        Device-side twin of the host accumulator's method, same restart rule: a
+        multi-row batch that starts at 0 and overlaps what is already stored
+        means the slot was reused by a new request. The rows never leave the
+        device -- only the single overlapping/restart decision is read back --
+        which is what keeps the capture path off the host.
+        """
+        if key.ndim != 3 or tuple(key.shape[1:]) != (self.kv_heads, self.head_dim):
+            raise ValueError("key must have shape [tokens, kv_heads, head_dim]")
+        if positions.ndim != 1 or positions.shape[0] != key.shape[0]:
+            raise ValueError("positions must be one-dimensional and match key tokens")
+        if positions.dtype not in (torch.int32, torch.int64):
+            raise ValueError("positions must use int32 or int64")
+        if key.shape[0] == 0:
+            return 0
+        capacity = self.num_blocks * self.block_size
+        positions = positions.to(device=key.device, dtype=torch.long)
+        if int(positions.min()) < 0 or int(positions.max()) >= capacity:
+            raise ValueError("logical position exceeds preallocated capacity")
+
+        self._ensure_seen_positions(key.device)
+        assert self._seen_positions is not None
+        seen_before = self._seen_positions[positions]
+        if bool(seen_before.any()) and int(positions[0]) == 0 and positions.shape[0] > 1:
+            # New sequence on a reused slot: the stored rows are stale.
+            self.reset()
+            self._ensure_seen_positions(key.device)
+            assert self._seen_positions is not None
+            seen_before = self._seen_positions[positions]
+
+        fresh = ~seen_before
+        n_fresh = int(fresh.sum())
+        if n_fresh == 0:
+            return 0
+        fresh_positions = positions[fresh]
+        key_fresh = key[fresh].to(device=self.device, dtype=torch.float32)
+        block_ids = fresh_positions // self.block_size
+        self._sum.index_add_(0, block_ids, key_fresh)
+        self._count.index_add_(
+            0, block_ids, torch.ones_like(block_ids, dtype=torch.long)
+        )
+        self._seen_positions[fresh_positions] = True
+        self._seen.update(int(p) for p in fresh_positions.tolist())
+        return n_fresh
 
     def snapshot(self) -> tuple[torch.Tensor, torch.Tensor]:
         means = self._sum.clone()

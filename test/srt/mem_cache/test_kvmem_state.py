@@ -48,5 +48,32 @@ class TestKVMemRequestState(unittest.TestCase):
         self.assertAlmostEqual(float(means[0][0][0]), 1.0)
 
 
+    def test_device_argument_selects_device_accumulator(self):
+        from sglang.srt.mem_cache.kvmem_mean_k import (
+            KVMemDeviceMeanKAccumulator,
+            KVMemMeanKAccumulator,
+        )
+
+        state = KVMemRequestState(block_size=2, max_tokens=8)
+        host = state.get_or_create_layer(3, 1, 1)
+        self.assertIsInstance(host, KVMemMeanKAccumulator)
+        # A device other than cpu selects the device-resident twin; meta keeps
+        # the test GPU-free while still exercising the branch.
+        state2 = KVMemRequestState(block_size=2, max_tokens=8)
+        device_acc = state2.get_or_create_layer(
+            3, 1, 1, device=torch.device("meta")
+        )
+        self.assertIsInstance(device_acc, KVMemDeviceMeanKAccumulator)
+
+    def test_geometry_change_rebuilds_the_accumulator(self):
+        state = KVMemRequestState(block_size=2, max_tokens=8)
+        first = state.get_or_create_layer(3, 1, 1)
+        second = state.get_or_create_layer(3, 2, 4)
+        self.assertIsNot(first, second)
+        self.assertEqual(second.kv_heads, 2)
+        self.assertEqual(second.head_dim, 4)
+        self.assertIs(state.get_or_create_layer(3, 2, 4), second)
+
+
 if __name__ == "__main__":
     unittest.main()

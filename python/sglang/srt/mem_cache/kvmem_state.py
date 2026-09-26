@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 
-from sglang.srt.mem_cache.kvmem_mean_k import KVMemMeanKAccumulator
+from sglang.srt.mem_cache.kvmem_mean_k import (
+    KVMemDeviceMeanKAccumulator,
+    KVMemMeanKAccumulator,
+)
 
 
 class KVMemRequestState:
@@ -41,22 +46,42 @@ class KVMemRequestState:
         return accumulator.update_idempotent(key, positions)
 
     def get_or_create_layer(
-        self, layer_id: int, kv_heads: int, head_dim: int
-    ) -> KVMemMeanKAccumulator:
+        self,
+        layer_id: int,
+        kv_heads: int,
+        head_dim: int,
+        *,
+        device: Optional[torch.device] = None,
+    ) -> KVMemMeanKAccumulator | KVMemDeviceMeanKAccumulator:
         """Return this layer's accumulator, creating or re-geometrying it.
 
         Geometry comes from the observed K tensor (TP-sharded), not from
         configuration: the two must agree or staging would raise mid-forward.
+        ``device`` selects the device-resident accumulator, which keeps the
+        staged rows on the GPU: with the host accumulator every committed row is
+        copied to host memory and touched row by row, which is visible as
+        prefill overhead.
         """
         accumulator = self._layers.get(layer_id)
-        if accumulator is None or (
+        if accumulator is not None and (
             accumulator.kv_heads != kv_heads or accumulator.head_dim != head_dim
         ):
-            accumulator = KVMemMeanKAccumulator(
-                block_size=self.block_size,
-                kv_heads=kv_heads,
-                head_dim=head_dim,
-            )
+            accumulator = None
+        if accumulator is None:
+            if device is not None and torch.device(device).type != "cpu":
+                accumulator = KVMemDeviceMeanKAccumulator(
+                    num_blocks=max(1, self.max_tokens // self.block_size),
+                    block_size=self.block_size,
+                    kv_heads=kv_heads,
+                    head_dim=head_dim,
+                    device=device,
+                )
+            else:
+                accumulator = KVMemMeanKAccumulator(
+                    block_size=self.block_size,
+                    kv_heads=kv_heads,
+                    head_dim=head_dim,
+                )
             self._layers[layer_id] = accumulator
         return accumulator
 

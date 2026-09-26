@@ -26,6 +26,7 @@ class KVMemRegistryConfig:
     head_dim: int = 1
     sink_blocks: int = 1
     recent_blocks: int = 0
+    device_accum: bool = False
 
 
 class KVMemRequestRegistry:
@@ -49,6 +50,7 @@ class KVMemRequestRegistry:
                     head_dim=self.config.head_dim,
                     sink_blocks=self.config.sink_blocks,
                     recent_blocks=self.config.recent_blocks,
+                    device_accum=self.config.device_accum,
                 )
             )
             self._controllers[request_id] = controller

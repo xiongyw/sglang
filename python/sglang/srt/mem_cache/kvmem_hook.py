@@ -66,6 +66,7 @@ def set_kvmem_hook_config(config: KVMemHookConfig) -> None:
                 head_dim=config.head_dim,
                 sink_blocks=config.sink_blocks,
                 recent_blocks=config.recent_blocks,
+                device_accum=config.device_accum,
             )
         )
     else:
@@ -85,6 +86,8 @@ def set_kvmem_hook_config_from_env() -> KVMemHookConfig:
         ),
         kv_heads=int(os.environ.get("SGLANG_KVMEM_KV_HEADS", 4)),
         head_dim=int(os.environ.get("SGLANG_KVMEM_HEAD_DIM", 256)),
+        device_accum=os.environ.get("SGLANG_KVMEM_DEVICE_ACCUM", "0")
+        not in ("", "0", "false"),
     )
     set_kvmem_hook_config(config)
     return config

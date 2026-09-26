@@ -102,6 +102,11 @@ def select_debug(
         if means.shape[0] == 0:
             _diag(f"empty_means key={key}")
             continue
+        # The accumulator may be device-resident (SGLANG_KVMEM_DEVICE_ACCUM);
+        # the probe scores on the host, so bring the block means across.
+        if means.device.type != "cpu":
+            means = means.to(device="cpu", dtype=torch.float32)
+            counts = counts.to(device="cpu")
         blocks = [
             KVMemBlock(
                 block_id=i,

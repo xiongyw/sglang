@@ -32,6 +32,7 @@ class KVMemRequestConfig:
     head_dim: int = 1
     sink_blocks: int = 1
     recent_blocks: int = 0
+    device_accum: bool = False
 
 
 @dataclass(frozen=True)
@@ -71,7 +72,10 @@ class KVMemRequestController:
     def stage_k(self, layer_id: int, key: torch.Tensor, positions: torch.Tensor) -> None:
         session = self._capture(layer_id)
         session.accumulator = self.state.get_or_create_layer(
-            layer_id, int(key.shape[1]), int(key.shape[2])
+            layer_id,
+            int(key.shape[1]),
+            int(key.shape[2]),
+            device=key.device if self.config.device_accum else None,
         )
         session.stage(key, positions)
 
