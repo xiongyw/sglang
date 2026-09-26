@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Mapping, Optional
 
 import torch
 
@@ -60,18 +60,22 @@ class KVMemRequestRegistry:
         groups = group_k_capture_rows(batch)
         for request_id, rows in groups.items():
             controller = self.controller(request_id)
-            positions = rows.positions.tolist()
-            if controller.state.conflicts(layer_id, positions):
-                # The request slot is being reused by a new request; the old
-                # accumulator describes a finished request and must be dropped.
-                controller.reset_layer(layer_id)
+            # Overlapping positions are normal here (verify steps re-stage the
+            # window), so staging never resets: the accumulator stores each
+            # logical position once and drops the repeats.
             controller.begin_capture(layer_id)
             controller.stage_k(layer_id, rows.key, rows.positions)
             self._staged[(request_id, layer_id)] = rows.key.shape[0]
 
     def commit_batch(
-        self, layer_id: int, accepted: Mapping[str, int]
-    ) -> None:
+        self, layer_id: int, accepted: Optional[Mapping[str, int]] = None
+    ) -> int:
+        """Store staged rows for one layer; return rows newly stored.
+
+        ``accepted=None`` stores every staged row: spec-decode acceptance is not
+        known when the batch is staged, and position identity in the accumulator
+        keeps re-staged rows from double counting.
+        """
         staged = {
             request_id: n
             for (request_id, lid), n in self._staged.items()
@@ -79,18 +83,24 @@ class KVMemRequestRegistry:
         }
         if not staged:
             raise RuntimeError(f"no active capture for layer {layer_id}")
-        for request_id, n_staged in staged.items():
-            n_accepted = accepted.get(request_id, 0)
-            if not 0 <= n_accepted <= n_staged:
-                raise ValueError(
-                    f"accepted {n_accepted} outside [0, {n_staged}] for {request_id}"
-                )
+        if accepted is not None:
+            for request_id, n_staged in staged.items():
+                n_accepted = accepted.get(request_id, 0)
+                if not 0 <= n_accepted <= n_staged:
+                    raise ValueError(
+                        f"accepted {n_accepted} outside [0, {n_staged}] for {request_id}"
+                    )
+        stored = 0
         for (request_id, lid) in list(self._staged):
             if lid == layer_id:
-                self.controller(request_id).commit_capture(
-                    layer_id, accepted.get(request_id, 0)
-                )
+                if accepted is None:
+                    stored += self.controller(request_id).commit_capture(layer_id)
+                else:
+                    stored += self.controller(request_id).commit_capture(
+                        layer_id, accepted.get(request_id, 0)
+                    )
                 del self._staged[(request_id, lid)]
+        return stored
 
     def rollback_batch(self, layer_id: int) -> None:
         for (request_id, lid) in list(self._staged):

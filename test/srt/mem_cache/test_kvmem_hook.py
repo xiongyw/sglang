@@ -214,20 +214,23 @@ class TestCommitLifecycle(unittest.TestCase):
         )
         commit_attention_k(layer_id=0, accepted={"slot:7": 2})
 
-        # A new request lands in the same slot and re-stages position 0.
+        # A new request lands in the same slot and re-stages the same window
+        # from position 0: a restart, so the stale rows must be dropped.
         capture_attention_k(
             layer_id=0,
-            key=torch.full((1, 1, 1), 9.0),
-            positions=torch.tensor([0]),
-            request_ids=["slot:7"],
+            key=torch.full((2, 1, 1), 9.0),
+            positions=torch.tensor([0, 1]),
+            request_ids=["slot:7", "slot:7"],
         )
-        commit_attention_k(layer_id=0, accepted={"slot:7": 1})
+        commit_attention_k(layer_id=0, accepted={"slot:7": 2})
 
         from sglang.srt.mem_cache.kvmem_hook import get_kvmem_registry
 
         means, counts = get_kvmem_registry().controller("slot:7").state.snapshot_layer(0)
+        # block_size=2: positions 0 and 1 share block 0, and the stale 1.0 rows
+        # are gone, so the block mean is the new 9.0.
         torch.testing.assert_close(means, torch.tensor([[[9.0]]]))
-        torch.testing.assert_close(counts, torch.tensor([1]))
+        torch.testing.assert_close(counts, torch.tensor([2]))
 
 
 if __name__ == "__main__":

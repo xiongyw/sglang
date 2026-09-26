@@ -7,6 +7,7 @@ scheduler or attention backend.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
@@ -74,8 +75,11 @@ class KVMemRequestController:
         )
         session.stage(key, positions)
 
-    def commit_capture(self, layer_id: int, accepted_tokens: int) -> None:
-        self._capture(layer_id).commit(accepted_tokens)
+    def commit_capture(
+        self, layer_id: int, accepted_tokens: Optional[int] = None
+    ) -> int:
+        """Store this layer's staged rows; accepted=None stores all of them."""
+        return self._capture(layer_id).commit(accepted_tokens)
 
     def rollback_capture(self, layer_id: int) -> None:
         self._capture(layer_id).rollback()

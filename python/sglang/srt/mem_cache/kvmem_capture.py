@@ -37,19 +37,31 @@ class KVMemKCaptureSession:
         self._key = key
         self._positions = positions
 
-    def commit(self, accepted_tokens: int) -> None:
+    def commit(self, accepted_tokens: Optional[int] = None) -> int:
+        """Store staged rows and return how many were newly stored.
+
+        ``accepted_tokens`` is optional: the production path passes nothing
+        because spec-decode acceptance is unknown at staging time, and position
+        identity (in ``update_idempotent``) prevents double counting. Tests and
+        callers that *do* know the accepted count may still pass it to store a
+        prefix only. Negative counts and counts beyond the staged batch raise.
+        """
         self._require_active()
-        if accepted_tokens < 0 or self._key is None or self._positions is None:
+        if self._key is None or self._positions is None:
             raise ValueError("accepted_tokens is outside staged batch")
-        if accepted_tokens > self._key.shape[0]:
+        n_staged = self._key.shape[0]
+        n_accept: int = n_staged if accepted_tokens is None else int(accepted_tokens)
+        if n_accept < 0 or n_accept > n_staged:
             raise ValueError("accepted_tokens is outside staged batch")
-        if accepted_tokens:
+        stored = 0
+        if n_accept:
             if self.accumulator is None:
                 raise RuntimeError("no accumulator bound; stage() ran without one")
-            self.accumulator.update(
-                self._key[:accepted_tokens], self._positions[:accepted_tokens]
+            stored = self.accumulator.update_idempotent(
+                self._key[:n_accept], self._positions[:n_accept]
             )
         self._clear()
+        return stored
 
     def rollback(self) -> None:
         self._require_active()

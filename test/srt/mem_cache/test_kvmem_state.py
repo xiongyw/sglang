@@ -34,12 +34,18 @@ class TestKVMemRequestState(unittest.TestCase):
 
         self.assertEqual(state.layer_ids, [])
 
-    def test_reusing_position_in_one_layer_is_rejected(self):
+    def test_re_staging_a_position_is_idempotent(self):
         state = KVMemRequestState(block_size=2, max_tokens=8)
-        state.update_layer(3, torch.ones((1, 1, 1)), torch.tensor([0]))
-
-        with self.assertRaises(ValueError):
-            state.update_layer(3, torch.ones((1, 1, 1)), torch.tensor([0]))
+        self.assertEqual(
+            state.update_layer(3, torch.ones((1, 1, 1)), torch.tensor([0])), 1
+        )
+        # The same logical position again: stored once, so nothing new lands.
+        self.assertEqual(
+            state.update_layer(3, torch.full((1, 1, 1), 9.0), torch.tensor([0])), 0
+        )
+        means, counts = state.snapshot_layer(3)
+        torch.testing.assert_close(counts, torch.tensor([1]))
+        self.assertAlmostEqual(float(means[0][0][0]), 1.0)
 
 
 if __name__ == "__main__":

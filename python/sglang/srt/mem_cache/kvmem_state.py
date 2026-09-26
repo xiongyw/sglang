@@ -23,7 +23,14 @@ class KVMemRequestState:
 
     def update_layer(
         self, layer_id: int, key: torch.Tensor, positions: torch.Tensor
-    ) -> None:
+    ) -> int:
+        """Store rows for this layer by logical position; return rows stored.
+
+        Position identity, not spec-decode acceptance, decides what is kept:
+        the first sighting of a logical position wins and re-stagings are
+        dropped, so a rejected draft row that is later refilled does not
+        double-count.
+        """
         if layer_id < 0:
             raise ValueError("layer_id must be non-negative")
         if positions.numel() and int(positions.max()) >= self.max_tokens:
@@ -31,7 +38,7 @@ class KVMemRequestState:
         accumulator = self.get_or_create_layer(
             layer_id, int(key.shape[1]), int(key.shape[2])
         )
-        accumulator.update(key, positions)
+        return accumulator.update_idempotent(key, positions)
 
     def get_or_create_layer(
         self, layer_id: int, kv_heads: int, head_dim: int

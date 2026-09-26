@@ -72,7 +72,10 @@ from sglang.srt.layers.quantization.unquant import (
     bf16_gemm_dispatch,
 )
 from sglang.srt.layers.radix_attention import RadixAttention
-from sglang.srt.mem_cache.kvmem_hook import maybe_capture_self_attention
+from sglang.srt.mem_cache.kvmem_hook import (
+    maybe_capture_self_attention,
+    maybe_select_debug,
+)
 from sglang.srt.layers.radix_linear_attention import RadixLinearAttention
 from sglang.srt.layers.rotary_embedding import get_rope
 from sglang.srt.layers.utils import PPMissingLayer, get_layer_id
@@ -1441,6 +1444,14 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
             key=k,
             forward_batch=forward_batch,
             kv_heads=self.attn.tp_k_head_num,
+            head_dim=self.attn.qk_head_dim,
+        )
+
+        maybe_select_debug(
+            layer_id=self.attn.layer_id,
+            query=q,
+            forward_batch=forward_batch,
+            q_heads=self.attn.tp_q_head_num,
             head_dim=self.attn.qk_head_dim,
         )
 

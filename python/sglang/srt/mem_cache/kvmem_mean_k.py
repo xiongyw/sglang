@@ -49,6 +49,57 @@ class KVMemMeanKAccumulator:
         """True if any logical position was already accumulated."""
         return any(position in self._seen for position in positions)
 
+    def reset(self) -> None:
+        """Drop all accumulated blocks (request slot reused by a new request)."""
+        self._sum = torch.empty((0, self.kv_heads, self.head_dim), dtype=torch.float32)
+        self._count = torch.empty((0,), dtype=torch.long)
+        self._seen = set()
+
+    def update_idempotent(self, key: torch.Tensor, positions: torch.Tensor) -> int:
+        """Accumulate rows for positions not seen yet; return rows stored.
+
+        Spec-decode acceptance is not known at staging time, so the engine
+        commits every staged row and relies on position identity here: a row is
+        stored once, at its first sighting, and later re-stagings of the same
+        logical position are dropped. A batch that restarts at position 0 means
+        the slot was reused by a new request, so the stale state is dropped.
+        """
+        if key.ndim != 3 or tuple(key.shape[1:]) != (self.kv_heads, self.head_dim):
+            raise ValueError("key must have shape [tokens, kv_heads, head_dim]")
+        if positions.ndim != 1 or positions.shape[0] != key.shape[0]:
+            raise ValueError("positions must be one-dimensional and match key tokens")
+        if positions.dtype not in (torch.int32, torch.int64):
+            raise ValueError("positions must use int32 or int64")
+        if key.shape[0] == 0:
+            return 0
+        positions_cpu = positions.detach().to(device="cpu", dtype=torch.long).tolist()
+        if (
+            positions_cpu[0] == 0
+            and len(positions_cpu) > 1
+            and any(position in self._seen for position in positions_cpu)
+        ):
+            # A multi-row batch that restarts at 0 and overlaps what is already
+            # stored is a new sequence on a reused slot: the old rows are stale.
+            # Single-row staging at position 0 is a first token, not a restart.
+            self.reset()
+        fresh_rows = [
+            row
+            for row, position in enumerate(positions_cpu)
+            if position not in self._seen
+        ]
+        if not fresh_rows:
+            return 0
+        fresh_positions = [positions_cpu[row] for row in fresh_rows]
+        max_block = max(fresh_positions) // self.block_size
+        self._grow(max_block + 1)
+        key_f32 = key.detach().to(device="cpu", dtype=torch.float32)
+        for row, position in zip(fresh_rows, fresh_positions):
+            block_id = position // self.block_size
+            self._sum[block_id] += key_f32[row]
+            self._count[block_id] += 1
+        self._seen.update(fresh_positions)
+        return len(fresh_rows)
+
     def snapshot(self) -> tuple[torch.Tensor, torch.Tensor]:
         means = self._sum.clone()
         nonzero = self._count > 0

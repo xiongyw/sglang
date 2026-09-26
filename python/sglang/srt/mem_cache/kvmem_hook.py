@@ -28,6 +28,21 @@ class KVMemHookConfig(KVMemRegistryConfig):
 _registry: Optional[KVMemRequestRegistry] = None
 _config: Optional[KVMemHookConfig] = None
 _debug_stats: Optional[dict] = None
+# Read-only selection probe: layer to probe (-1 = off) and call cadence.
+_select_layer = -1
+_select_every = 0
+_select_calls = 0
+
+
+def _refresh_debug_flags() -> None:
+    global _select_layer, _select_every, _select_calls
+    if os.environ.get("SGLANG_KVMEM_DEBUG_SELECT", "0") not in ("", "0", "false"):
+        _select_layer = int(os.environ.get("SGLANG_KVMEM_SELECT_LAYER", 3))
+        _select_every = max(1, int(os.environ.get("SGLANG_KVMEM_SELECT_EVERY", 32)))
+    else:
+        _select_layer = -1
+        _select_every = 0
+    _select_calls = 0
 
 
 def get_kvmem_debug_stats() -> Optional[dict]:
@@ -39,6 +54,7 @@ def set_kvmem_hook_config(config: KVMemHookConfig) -> None:
     """Install hook configuration; recreates the registry on change."""
     global _config, _registry, _debug_stats
     _config = config
+    _refresh_debug_flags()
     if config.enabled:
         _debug_stats = {"captured_rows": 0, "committed_rows": 0}
         _registry = KVMemRequestRegistry(
@@ -80,6 +96,7 @@ def reset_kvmem_hook() -> None:
     _config = None
     _registry = None
     _debug_stats = None
+    _refresh_debug_flags()
 
 
 def hook_enabled() -> bool:
@@ -118,14 +135,23 @@ def capture_attention_k(
     return True
 
 
-def commit_attention_k(*, layer_id: int, accepted: Mapping[str, int]) -> bool:
-    """Commit accepted rows per request; returns False when disabled."""
+def commit_attention_k(
+    *, layer_id: int, accepted: Optional[Mapping[str, int]] = None
+) -> bool:
+    """Store staged rows for one layer; returns False when disabled.
+
+    ``accepted=None`` stores every staged row. Spec-decode acceptance is not
+    known where the batch is staged, so the engine stores all of them and lets
+    logical-position identity discard the re-staged ones.
+    """
     if not hook_enabled():
         return False
-    accepted_map = dict(accepted)
-    get_kvmem_registry().commit_batch(layer_id=layer_id, accepted=accepted_map)
+    accepted_map = None if accepted is None else dict(accepted)
+    stored = get_kvmem_registry().commit_batch(
+        layer_id=layer_id, accepted=accepted_map
+    )
     if _debug_stats is not None:
-        _debug_stats["committed_rows"] += sum(accepted_map.values())
+        _debug_stats["committed_rows"] += int(stored)
     return True
 
 
@@ -236,6 +262,82 @@ def _capture_skip_reason(forward_batch, key) -> Optional[str]:
     if len(ids) != n_rows:
         return f"id_row_mismatch {len(ids)}/{n_rows}"
     return None
+
+
+def _slot_diag(forward_batch) -> str:
+    """Slot list plus whether captured state exists for them (probe only)."""
+    rpi = getattr(forward_batch, "req_pool_indices", None)
+    if rpi is None:
+        return "no_rpi"
+    slots = [f"slot:{int(s)}" for s in rpi.tolist()]
+    registry = _registry
+    if registry is None:
+        return f"{slots} registry=None"
+    state = []
+    for slot in slots:
+        controller = registry._controllers.get(slot)
+        layers = controller.state.layer_ids if controller is not None else []
+        state.append(f"{slot}:layers={layers}")
+    return f"{state}"
+
+
+def _log_select_first_call(layer_id, query, q_heads, head_dim, forward_batch) -> None:
+    """One-shot probe diagnostic: geometry and which slots carry state."""
+    import logging
+
+    logging.getLogger(__name__).info(
+        f"KVMem select probe: first call layer={layer_id} "
+        f"q_ndim={query.ndim} q_shape={tuple(query.shape)} "
+        f"q_heads={q_heads} head_dim={head_dim} "
+        f"slots={_slot_diag(forward_batch)}"
+    )
+
+
+def maybe_select_debug(
+    *,
+    layer_id: int,
+    query: torch.Tensor,
+    forward_batch,
+    q_heads: Optional[int] = None,
+    head_dim: Optional[int] = None,
+) -> bool:
+    """Rank captured blocks for the current query (read-only probe).
+
+    Off unless SGLANG_KVMEM_DEBUG_SELECT is set; probes one layer and every
+    SGLANG_KVMEM_SELECT_EVERY-th call. Never mutates KV state.
+    """
+    global _select_calls
+    if _select_every == 0 or layer_id != _select_layer or not hook_enabled():
+        return False
+    if _capture_mode.is_capture_mode:
+        # Host syncs are illegal while a graph is being captured.
+        return False
+    _select_calls += 1
+    if _select_calls == 1:
+        _log_select_first_call(layer_id, query, q_heads, head_dim, forward_batch)
+    if _select_every > 1 and _select_calls % _select_every:
+        return False
+    if query.ndim == 2:
+        if q_heads is None or head_dim is None:
+            return False
+        if query.shape[1] != q_heads * head_dim:
+            return False
+        query = query.view(query.shape[0], q_heads, head_dim)
+    elif query.ndim != 3:
+        return False
+
+    from sglang.srt.mem_cache.kvmem_select_debug import (
+        log_selection,
+        select_debug,
+    )
+
+    results = select_debug(
+        layer_id=layer_id, query=query, forward_batch=forward_batch
+    )
+    if results:
+        log_selection(results, layer_id)
+        return True
+    return False
 
 
 def maybe_capture_self_attention(
