@@ -110,17 +110,20 @@ Target-only decode, ~25k prompt tokens
   speedup 1.31x against an ideal 2.0x, leaving ~10.1 ms per step
   that split compute does not explain
 
-Speculative vs plain at the same prompts
-  depth        target-only     DFlash2 w512    DFlash2 no window flag
-  ~25k         34.05           45.45           28.24
-  ~115k        24.19           17.07           16.31
+Speculative vs plain at matching prompts
+  depth     target-only   DFlash2 w512   DFlash2 no window flag
+  ~25k      34.05         45.45          28.24
+  ~39k      32.05         39.05          -
+  ~59k      29.55         23.02          -
+  ~115k     24.19         17.07          16.31
 ```
 
 Three qualifications follow, and they bound where the drafter is worth using.
 
-1. The drafter's advantage is confined to shallow and medium depth. At ~115k the target-only path is 29-33% faster than every speculative setting measured, and it is not a window problem: windows of 512, 1024, 2048 and 4096 all land within 4.7% of each other at ~119.5-120.2 ms per step, with acceptance 1.50-2.35 against the 2.89 tokens per step that a 115k speculative step needs to break even.
+1. The drafter crosses from a win to a loss between ~39k and ~59k prompt tokens. The decline is monotone, so treat the crossover as ~45-50k rather than a sharp boundary. Both terms push the same way: acceptance falls with depth while the speculative step grows faster than the plain step (68.4 -> 119.5 ms against 29.4 -> 41.4 ms). At ~115k the target-only path is 29-33% faster than every speculative setting measured, and it is not a window problem: windows of 512, 1024, 2048 and 4096 all land within 4.7% at 119.5-120.2 ms per step, with acceptance 1.50-2.35 against the 2.89 tokens per step that a 115k speculative step needs to break even.
 2. The ~200K envelope of roughly 33 tok/s is not reproduced under this harness: the best speculative arm at ~115k measured 17.07 tok/s. Treat that envelope as unreproduced until a matching configuration is identified.
 3. Greedy output is not bit-reproducible across server restarts on this build. A target-only continuation was compared with itself across two restarts and diverged at token 48 of 96, while the two speculative runs were identical. The claim above that outputs matched the target-only greedy control therefore holds only up to the first divergence, and any bit-identity check needs repeats rather than a single agreeing run.
+4. A speculative number needs more repetitions than a plain one. The target-only warm runs agreed to 0.1% at every depth (32.03-32.05 tok/s at ~39k), while the speculative warm runs spanned 26.45-42.25 tok/s at ~39k and 22.55-40.54 at ~59k. Compare speculative arms on medians of several runs, never on a single run.
 
 ## Setup and installation
 
