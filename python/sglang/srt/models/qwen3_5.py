@@ -1440,6 +1440,8 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
             layer_id=self.attn.layer_id,
             key=k,
             forward_batch=forward_batch,
+            kv_heads=self.attn.tp_k_head_num,
+            head_dim=self.attn.qk_head_dim,
         )
 
         attn_output = self.attn(q, k, v, forward_batch)

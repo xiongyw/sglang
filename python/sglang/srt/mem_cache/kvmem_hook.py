@@ -17,7 +17,7 @@ from sglang.srt.mem_cache.kvmem_registry import (
     KVMemRegistryConfig,
     KVMemRequestRegistry,
 )
-from sglang.srt.model_executor.runner import get_is_capture_mode
+from sglang.srt.model_executor.runner_utils import capture_mode as _capture_mode
 
 
 @dataclass(frozen=True)
@@ -27,13 +27,20 @@ class KVMemHookConfig(KVMemRegistryConfig):
 
 _registry: Optional[KVMemRequestRegistry] = None
 _config: Optional[KVMemHookConfig] = None
+_debug_stats: Optional[dict] = None
+
+
+def get_kvmem_debug_stats() -> Optional[dict]:
+    """Return capture counters, or None when the hook is off."""
+    return _debug_stats
 
 
 def set_kvmem_hook_config(config: KVMemHookConfig) -> None:
     """Install hook configuration; recreates the registry on change."""
-    global _config, _registry
+    global _config, _registry, _debug_stats
     _config = config
     if config.enabled:
+        _debug_stats = {"captured_rows": 0, "committed_rows": 0}
         _registry = KVMemRequestRegistry(
             KVMemRegistryConfig(
                 block_size=config.block_size,
@@ -47,6 +54,7 @@ def set_kvmem_hook_config(config: KVMemHookConfig) -> None:
         )
     else:
         _registry = None
+        _debug_stats = None
 
 
 def set_kvmem_hook_config_from_env() -> KVMemHookConfig:
@@ -68,9 +76,10 @@ def set_kvmem_hook_config_from_env() -> KVMemHookConfig:
 
 def reset_kvmem_hook() -> None:
     """Disable the hook and drop all captured state."""
-    global _config, _registry
+    global _config, _registry, _debug_stats
     _config = None
     _registry = None
+    _debug_stats = None
 
 
 def hook_enabled() -> bool:
@@ -97,6 +106,15 @@ def capture_attention_k(
         key=key, positions=positions, request_ids=list(request_ids)
     )
     get_kvmem_registry().capture_batch(layer_id=layer_id, batch=batch)
+    if _debug_stats is not None:
+        _debug_stats["captured_rows"] += key.shape[0]
+        if os.environ.get("SGLANG_KVMEM_DEBUG_STATS"):
+            _debug_stats["stage_calls"] = _debug_stats.get("stage_calls", 0) + 1
+            _debug_stats["last_stage_rows"] = int(key.shape[0])
+            _debug_stats["last_stage_pos"] = (
+                int(positions[0]),
+                int(positions[-1]),
+            )
     return True
 
 
@@ -104,7 +122,10 @@ def commit_attention_k(*, layer_id: int, accepted: Mapping[str, int]) -> bool:
     """Commit accepted rows per request; returns False when disabled."""
     if not hook_enabled():
         return False
-    get_kvmem_registry().commit_batch(layer_id=layer_id, accepted=dict(accepted))
+    accepted_map = dict(accepted)
+    get_kvmem_registry().commit_batch(layer_id=layer_id, accepted=accepted_map)
+    if _debug_stats is not None:
+        _debug_stats["committed_rows"] += sum(accepted_map.values())
     return True
 
 
@@ -116,41 +137,104 @@ def rollback_attention_k(*, layer_id: int) -> bool:
     return True
 
 
-def _per_row_request_ids(forward_batch) -> Optional[list[str]]:
-    """Derive one request id per K row, or None when it cannot be exact.
-
-    Exact cases: decode with rids matching batch rows; extend with host-side
-    start locations. Inexact cases (CUDA-graph capture/replay padding, missing
-    rids, mismatched counts) return None so the caller skips capture.
-    """
-    if get_is_capture_mode():
-        return None
-    rids = getattr(forward_batch, "rids", None)
-    if not rids:
-        return None
+def _rows_per_request(forward_batch, n_rows: int) -> Optional[list[int]]:
+    """Rows contributed by each request in this batch, or None if not exact."""
     mode = forward_batch.forward_mode
-    n_rows = int(forward_batch.seq_lens.shape[0])
-    if mode.is_decode():
-        if len(rids) != n_rows or (forward_batch.positions is None):
+    rpi = getattr(forward_batch, "req_pool_indices", None)
+    if rpi is None or n_rows <= 0:
+        return None
+    n_req = int(rpi.shape[0])
+    if n_req <= 0:
+        return None
+    if mode.is_extend() and not mode.is_target_verify():
+        lens = getattr(forward_batch, "extend_seq_lens_cpu", None)
+        if lens is None or len(lens) != n_req:
             return None
-        if forward_batch.positions.shape[0] != n_rows:
-            return None
-        return list(rids)
-    if mode.is_extend():
-        start_loc = forward_batch.extend_start_loc
-        seq_lens_cpu = forward_batch.extend_seq_lens_cpu
-        if start_loc is None or seq_lens_cpu is None:
-            return None
-        if len(rids) != len(seq_lens_cpu):
-            return None
-        starts = start_loc[: len(seq_lens_cpu)].tolist()
-        row_ids: list[str] = []
-        for request_id, start, length in zip(rids, starts, seq_lens_cpu):
-            row_ids.extend([request_id] * int(length))
-        positions = forward_batch.positions
-        if positions is None or positions.shape[0] != len(row_ids):
-            return None
-        return row_ids
+        lens = [int(x) for x in lens]
+        return lens if sum(lens) == n_rows else None
+    # Decode and target-verify carry a uniform number of rows per request
+    # (1 for decode, num_draft_tokens for verify).
+    if n_rows % n_req:
+        return None
+    return [n_rows // n_req] * n_req
+
+
+def _per_row_request_ids(
+    forward_batch, n_rows: Optional[int] = None
+) -> Optional[list[str]]:
+    """Derive one request key per K row, or None when it cannot be exact.
+
+    Requests are keyed by their ``req_pool_indices`` slot (the engine's stable
+    per-request identity). ``rids`` is deliberately not used: it is empty on
+    the DFlash2 appliance path. Inexact cases (capture mode, missing/uneven
+    metadata, mismatched counts) return None so the caller skips capture.
+    """
+    if _capture_mode.is_capture_mode:
+        return None
+    positions = getattr(forward_batch, "positions", None)
+    if n_rows is None:
+        n_rows = 0 if positions is None else int(positions.shape[0])
+    if n_rows <= 0:
+        return None
+    rpi = getattr(forward_batch, "req_pool_indices", None)
+    if rpi is None:
+        return None
+    if positions is None or int(positions.shape[0]) != n_rows:
+        return None
+    lens = _rows_per_request(forward_batch, n_rows)
+    if lens is None:
+        return None
+    keys: list[str] = []
+    for slot, count in zip(rpi.tolist(), lens):
+        keys.extend([f"slot:{int(slot)}"] * int(count))
+    return keys if len(keys) == n_rows else None
+
+
+def _log_gate_skip(layer_id: int, reason: str) -> None:
+    import logging
+
+    logging.getLogger(__name__).info(
+        f"KVMem gate skip layer={layer_id}: {reason}"
+    )
+
+
+def _diag_fields(forward_batch, key) -> str:
+    """Compact description of the row/request metadata at this seam."""
+    mode = forward_batch.forward_mode
+    mode_name = getattr(mode, "name", str(mode))
+    rids = getattr(forward_batch, "rids", None)
+    rpi = getattr(forward_batch, "req_pool_indices", None)
+    pos = getattr(forward_batch, "positions", None)
+    sl = getattr(forward_batch, "seq_lens", None)
+    esc = getattr(forward_batch, "extend_seq_lens_cpu", None)
+    return (
+        f"mode={mode_name} key={tuple(key.shape)} "
+        f"rids={0 if not rids else len(rids)} "
+        f"rpi={0 if rpi is None else rpi.shape[0]} "
+        f"pos={0 if pos is None else pos.shape[0]} "
+        f"seq_lens={0 if sl is None else sl.shape[0]} "
+        f"batch_size={getattr(forward_batch, 'batch_size', None)} "
+        f"ext_lens={0 if esc is None else len(esc)}"
+    )
+
+
+def _capture_skip_reason(forward_batch, key) -> Optional[str]:
+    if _capture_mode.is_capture_mode:
+        return "capture_mode"
+    n_rows = int(key.shape[0])
+    if n_rows <= 0:
+        return "no_rows"
+    rpi = getattr(forward_batch, "req_pool_indices", None)
+    if rpi is None:
+        return "no_req_pool_indices"
+    lens = _rows_per_request(forward_batch, n_rows)
+    if lens is None:
+        return "rows_per_request_inexact"
+    ids = _per_row_request_ids(forward_batch, n_rows)
+    if ids is None:
+        return "row_mapping_failed"
+    if len(ids) != n_rows:
+        return f"id_row_mismatch {len(ids)}/{n_rows}"
     return None
 
 
@@ -159,17 +243,33 @@ def maybe_capture_self_attention(
     layer_id: int,
     key: torch.Tensor,
     forward_batch,
+    kv_heads: Optional[int] = None,
+    head_dim: Optional[int] = None,
 ) -> bool:
     """Stage current K rows when the row<->request mapping is exact.
 
-    No-op (returns False) when the hook is disabled or when the mapping
-    cannot be derived exactly (graph capture/replay, padded batches,
-    speculative modes without exact metadata).
+    Returns False (no-op) when the hook is disabled, when the mapping cannot be
+    derived exactly (capture mode, padded/uneven batches, unknown spec mode), or
+    when ``key`` cannot be reshaped with the given layer geometry.
     """
     if not hook_enabled():
         return False
-    request_ids = _per_row_request_ids(forward_batch)
+    if os.environ.get("SGLANG_KVMEM_DEBUG_GATES"):
+        reason = _capture_skip_reason(forward_batch, key)
+        if reason:
+            _log_gate_skip(layer_id, f"{reason} | {_diag_fields(forward_batch, key)}")
+    request_ids = _per_row_request_ids(forward_batch, int(key.shape[0]))
     if request_ids is None or key.shape[0] != len(request_ids):
+        return False
+    if key.ndim == 2:
+        # self_attention hands K as [tokens, kv_heads * head_dim] (TP-sharded).
+        if kv_heads is None or head_dim is None:
+            assert _config is not None
+            kv_heads, head_dim = _config.kv_heads, _config.head_dim
+        if key.shape[1] != kv_heads * head_dim:
+            return False
+        key = key.view(key.shape[0], kv_heads, head_dim)
+    elif key.ndim != 3:
         return False
     return capture_attention_k(
         layer_id=layer_id,

@@ -45,6 +45,10 @@ class KVMemMeanKAccumulator:
             self._count[block_id] += 1
             self._seen.add(position)
 
+    def seen_any(self, positions: list[int]) -> bool:
+        """True if any logical position was already accumulated."""
+        return any(position in self._seen for position in positions)
+
     def snapshot(self) -> tuple[torch.Tensor, torch.Tensor]:
         means = self._sum.clone()
         nonzero = self._count > 0

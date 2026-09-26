@@ -60,27 +60,31 @@ class KVMemRequestController:
     def begin_capture(self, layer_id: int) -> None:
         if layer_id in self._captures and self._captures[layer_id].active:
             raise RuntimeError("layer capture already active")
-        accumulator = self.state._layers.get(layer_id)
-        if accumulator is None:
-            from sglang.srt.mem_cache.kvmem_mean_k import KVMemMeanKAccumulator
-
-            accumulator = KVMemMeanKAccumulator(
-                block_size=self.config.block_size,
-                kv_heads=self.config.kv_heads,
-                head_dim=self.config.head_dim,
-            )
-            self.state._layers[layer_id] = accumulator
-        self._captures[layer_id] = KVMemKCaptureSession(accumulator)
+        # The accumulator's geometry is fixed at stage time from the observed
+        # K tensor (TP-sharded), so it is deliberately not created here.
+        self._captures[layer_id] = KVMemKCaptureSession(
+            self.state._layers.get(layer_id)
+        )
         self._captures[layer_id].begin()
 
     def stage_k(self, layer_id: int, key: torch.Tensor, positions: torch.Tensor) -> None:
-        self._capture(layer_id).stage(key, positions)
+        session = self._capture(layer_id)
+        session.accumulator = self.state.get_or_create_layer(
+            layer_id, int(key.shape[1]), int(key.shape[2])
+        )
+        session.stage(key, positions)
 
     def commit_capture(self, layer_id: int, accepted_tokens: int) -> None:
         self._capture(layer_id).commit(accepted_tokens)
 
     def rollback_capture(self, layer_id: int) -> None:
         self._capture(layer_id).rollback()
+
+    def reset_layer(self, layer_id: int) -> None:
+        """Drop layer state; used when a request slot is reused."""
+        self.state.reset_layer(layer_id)
+        self._captures.pop(layer_id, None)
+        self._resident.pop(layer_id, None)
 
     def score_query(self, layer_id: int, query: torch.Tensor) -> torch.Tensor:
         means, counts = self.state.snapshot_layer(layer_id)

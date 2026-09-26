@@ -60,6 +60,11 @@ class KVMemRequestRegistry:
         groups = group_k_capture_rows(batch)
         for request_id, rows in groups.items():
             controller = self.controller(request_id)
+            positions = rows.positions.tolist()
+            if controller.state.conflicts(layer_id, positions):
+                # The request slot is being reused by a new request; the old
+                # accumulator describes a finished request and must be dropped.
+                controller.reset_layer(layer_id)
             controller.begin_capture(layer_id)
             controller.stage_k(layer_id, rows.key, rows.positions)
             self._staged[(request_id, layer_id)] = rows.key.shape[0]

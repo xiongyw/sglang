@@ -195,6 +195,10 @@ from sglang.srt.server_args import (  # noqa: F401  (re-export)
 from sglang.srt.speculative.adaptive_spec_params import (
     resolve_candidate_steps_from_config,
 )
+from sglang.srt.mem_cache.kvmem_scheduler_hook import (
+    finish_kvmem_forward,
+    maybe_enable_kvmem_hook,
+)
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.speculative.spec_utils import resolve_num_tokens_per_req
 from sglang.srt.state_capturer.base import TopkCaptureOutput
@@ -1182,6 +1186,9 @@ class ModelRunner:
             f"Load weight begin. avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
         )
 
+        if not self.is_draft_worker:
+            maybe_enable_kvmem_hook()
+
         # This can reduce thread conflicts and speed up weight loading.
         if self.device != "cpu":
             torch.set_num_threads(1)
@@ -1691,6 +1698,8 @@ class ModelRunner:
         forward_batch.apply_deprecated_skip_attn_backend_init(skip_attn_backend_init)
 
         self.forward_pass_id += 1
+
+        finish_kvmem_forward(forward_batch)
 
         # Try msprob debugger
         if self.msprobe_debugger is not None:

@@ -12,7 +12,9 @@ from sglang.srt.mem_cache.kvmem_mean_k import KVMemMeanKAccumulator
 class KVMemKCaptureSession:
     """Stage newly produced K rows and commit only accepted logical positions."""
 
-    def __init__(self, accumulator: KVMemMeanKAccumulator):
+    def __init__(self, accumulator: Optional[KVMemMeanKAccumulator] = None):
+        # Bound at stage time so the accumulator geometry follows the observed
+        # (TP-sharded) K tensor rather than static configuration.
         self.accumulator = accumulator
         self.active = False
         self._key: Optional[torch.Tensor] = None
@@ -42,6 +44,8 @@ class KVMemKCaptureSession:
         if accepted_tokens > self._key.shape[0]:
             raise ValueError("accepted_tokens is outside staged batch")
         if accepted_tokens:
+            if self.accumulator is None:
+                raise RuntimeError("no accumulator bound; stage() ran without one")
             self.accumulator.update(
                 self._key[:accepted_tokens], self._positions[:accepted_tokens]
             )
