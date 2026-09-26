@@ -107,8 +107,13 @@ Measured 2026-09-26 on `7900xtx-qwen38-27b-tp2pp1` at `b691c69a9f`, same filler-
 Target-only decode, ~25k prompt tokens
   TP=2                 34.05 tok/s      29.36 ms/step
   TP=1                 25.95 tok/s      38.53 ms/step
-  speedup 1.31x against an ideal 2.0x, leaving ~10.1 ms per step
-  that split compute does not explain
+  speedup 1.31x against an ideal 2.0x.
+  Of that shortfall, 5.85 ms per step is measured collective time: a decode
+  step issues 128 all-reduces (two row-parallel reductions per layer x 64
+  layers) and a dependent chain of 128 such calls costs 45.7 us each at
+  (1, 5120) bf16, measured on a 2-rank torchrun bench. TP=1 pays none of it,
+  so removing it lifts TP=2 to 1.64x; the remainder is per-rank kernel
+  efficiency at halved N.
 
 Speculative vs plain at matching prompts
   depth     target-only   DFlash2 w512   DFlash2 no window flag
