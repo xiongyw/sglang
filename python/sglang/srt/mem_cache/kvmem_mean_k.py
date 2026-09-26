@@ -101,6 +101,13 @@ class KVMemMeanKAccumulator:
         return len(fresh_rows)
 
     def snapshot(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Block means and counts.
+
+        Sizing differs from the host accumulator by design: this one is
+        preallocated to its full block capacity, while the host one grows to the
+        blocks it has actually touched. Callers must therefore filter on
+        ``counts > 0`` rather than assume the two shapes match.
+        """
         means = self._sum.clone()
         nonzero = self._count > 0
         if torch.any(nonzero):
@@ -257,6 +264,13 @@ class KVMemDeviceMeanKAccumulator:
         return n_fresh
 
     def snapshot(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Block means and counts.
+
+        Sizing differs from the host accumulator by design: this one is
+        preallocated to its full block capacity, while the host one grows to the
+        blocks it has actually touched. Callers must therefore filter on
+        ``counts > 0`` rather than assume the two shapes match.
+        """
         means = self._sum.clone()
         nonzero = self._count > 0
         if torch.any(nonzero):

@@ -110,5 +110,62 @@ class TestDeviceAccumulatorIdempotent(unittest.TestCase):
         self.assertEqual(counts.device.type, "cpu")
 
 
+class TestDeviceHostParity(unittest.TestCase):
+    """The device twin must be numerically equivalent to the host one."""
+
+    def _drive_both(self, batches):
+        from sglang.srt.mem_cache.kvmem_mean_k import KVMemMeanKAccumulator
+
+        host = KVMemMeanKAccumulator(block_size=2, kv_heads=1, head_dim=2)
+        device = _acc()
+        for key, positions in batches:
+            host.update_idempotent(key, positions)
+            device.update_idempotent(key, positions)
+        return host.snapshot(), device.snapshot()
+
+    def _assert_same_used_region(self, host_pair, device_pair):
+        """Compare the used blocks: the host grows its buffers, the device one
+        is preallocated, so only the prefix that the host materialised is
+        comparable."""
+        (hm, hc), (dm, dc) = host_pair, device_pair
+        n = hm.shape[0]
+        torch.testing.assert_close(hm, dm[:n])
+        torch.testing.assert_close(hc, dc[:n])
+
+    def test_agree_on_plain_accumulation(self):
+        torch.manual_seed(0)
+        key = torch.randn(6, 1, 2)
+        self._assert_same_used_region(
+            *self._drive_both([(key, torch.arange(6))])
+        )
+
+    def test_agree_on_overlapping_restaging(self):
+        torch.manual_seed(1)
+        first = torch.randn(4, 1, 2)
+        second = torch.randn(4, 1, 2)
+        self._assert_same_used_region(
+            *self._drive_both(
+                [(first, torch.arange(4)), (second, torch.tensor([2, 3, 4, 5]))]
+            )
+        )
+
+    def test_agree_on_slot_restart(self):
+        torch.manual_seed(2)
+        first = torch.randn(4, 1, 2)
+        second = torch.randn(4, 1, 2)
+        self._assert_same_used_region(
+            *self._drive_both([(first, torch.arange(4)), (second, torch.arange(4))])
+        )
+
+    def test_agree_on_three_interleaved_batches(self):
+        torch.manual_seed(3)
+        batches = [
+            (torch.randn(3, 1, 2), torch.tensor([0, 1, 2])),
+            (torch.randn(4, 1, 2), torch.tensor([3, 4, 5, 6])),
+            (torch.randn(3, 1, 2), torch.tensor([5, 6, 7])),
+        ]
+        self._assert_same_used_region(*self._drive_both(batches))
+
+
 if __name__ == "__main__":
     unittest.main()
