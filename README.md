@@ -261,11 +261,189 @@ The branch also contains a loader-side safeguard for the GPTQ/AutoRound quantiza
 
 ## Start and stop the appliance
 
-The repository does not contain the launcher; it lives in the setup directory described above:
+The tested launcher is below. Save it as `$LAUNCH_SCRIPT` (by default
+`$SETUP_DIR/launch_tp2_dflash_8080.sh`), make it executable, and run it: this is the script the
+measurements in this README were produced with. Every path, port and knob is an environment
+variable with a default, so nothing here is tied to a particular home directory.
 
-```text
-$LAUNCH_SCRIPT
+```bash
+#!/usr/bin/env bash
+# Launch the TP=2/PP=1 Qwen3.8-27B W4A16 + DFlash2 appliance.
+# Every path, port and knob below is an environment variable with a default, so
+# the script is not tied to a particular home directory.
+set -euo pipefail
+
+SGLANG_ROOT="${SGLANG_ROOT:-${SGLANG_DIR:-$HOME/github/sglang}}"
+VENV_PYTHON="${VENV_PYTHON:-${PYTHON:-$HOME/venv/sglang/bin/python}}"
+TARGET_MODEL="${TARGET_MODEL:-$HOME/models/safetensors/Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ}"
+DRAFT_MODEL="${DRAFT_MODEL:-$HOME/models/safetensors/syvai/Qwen3.8-27B-DFlash2-W4A16}"
+HOST="${HOST:-0.0.0.0}"
+PORT="${PORT:-8080}"
+SERVED_MODEL="${SERVED_MODEL:-qwen3.8-27b-7900xtx-dflash-tp2}"
+CONTEXT_LENGTH="${CONTEXT_LENGTH:-262144}"
+MEM_FRACTION="${MEM_FRACTION:-0.90}"
+LOG_DIR="${LOG_DIR:-${SETUP_DIR:-$HOME/sglang-setup}/logs}"
+LOG_FILE="${LOG_FILE:-$LOG_DIR/tp2-dflash-$PORT.log}"
+HEALTH_HOST="${HEALTH_HOST:-127.0.0.1}"
+
+usage() {
+  printf 'Usage: %s [--kill]\n' "$0"
+  printf '  no option  Launch the TP=2/PP=1 DFlash2 server on %s:%s\n' "$HOST" "$PORT"
+  printf '  --kill     Stop the process group owning port %s\n' "$PORT"
+}
+
+port_pid() {
+  ss -lptnH "sport = :${PORT}" 2>/dev/null \
+    | grep -oP 'pid=\K[0-9]+' \
+    | head -1 || true
+}
+
+fail_if_port_busy() {
+  local pid
+  pid="$(port_pid)"
+  if [[ -n "${pid}" ]]; then
+    printf 'Port %s is already owned by PID %s.\n' "$PORT" "$pid" >&2
+    printf 'Inspect it with: ps -fp %s\n' "$pid" >&2
+    exit 1
+  fi
+}
+
+kill_server() {
+  local pid pgid remaining
+  pid="$(port_pid)"
+  if [[ -z "${pid}" ]]; then
+    printf 'Port %s is already free.\n' "$PORT"
+    exit 0
+  fi
+  pgid="$(ps -o pgid= -p "$pid" | tr -d ' ' || true)"
+  printf 'Stopping port %s owner PID %s (process group %s).\n' "$PORT" "$pid" "${pgid:-unknown}"
+  if [[ -n "${pgid}" && "${pgid}" != "0" ]]; then
+    kill -TERM -- "-${pgid}" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  else
+    kill -TERM "$pid" 2>/dev/null || true
+  fi
+  for _ in $(seq 1 90); do
+    remaining="$(port_pid)"
+    [[ -z "${remaining}" ]] && { printf 'Stopped.\n'; return 0; }
+    sleep 1
+  done
+  remaining="$(port_pid)"
+  if [[ -n "${remaining}" ]]; then
+    printf 'Graceful stop timed out; killing PID %s.\n' "${remaining}" >&2
+    kill -KILL "${remaining}" 2>/dev/null || true
+  fi
+  [[ -z "$(port_pid)" ]] && printf 'Stopped.\n'
+}
+
+case "${1:-}" in
+  "") ;;
+  --kill) kill_server; exit 0 ;;
+  --help|-h) usage; exit 0 ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+for path in "$SGLANG_ROOT" "$TARGET_MODEL" "$DRAFT_MODEL"; do
+  [[ -e "$path" ]] || { printf 'Missing path: %s\n' "$path" >&2; exit 1; }
+done
+[[ -x "$VENV_PYTHON" ]] || { printf 'Missing Python: %s\n' "$VENV_PYTHON" >&2; exit 1; }
+
+fail_if_port_busy
+mkdir -p "$(dirname "$LOG_FILE")"
+
+export PYTHONPATH="$SGLANG_ROOT/python/sglang/kernels/aot/python:$SGLANG_ROOT/python${PYTHONPATH:+:$PYTHONPATH}"
+export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1}"
+export SGLANG_USE_AITER_AR="${SGLANG_USE_AITER_AR:-0}"
+export SGLANG_DFLASH_PHASE_TIMING="${SGLANG_DFLASH_PHASE_TIMING:-0}"
+export SGLANG_DFLASH_DEVICE_TIMING="${SGLANG_DFLASH_DEVICE_TIMING:-0}"
+unset SGLANG_USE_1STAGE_ALLREDUCE SGLANG_ENABLE_DETERMINISTIC_INFERENCE
+
+# Compact draft-cache window for DFlash2. With the flag absent the engine default
+# is None, and dflash_worker_v2 sets use_compact_draft_cache = window is not None,
+# i.e. the drafter attends over the full context. Measured on this appliance at
+# ~25k tokens: 28.24 tok/s without the flag versus 45.45 tok/s with 512, at an
+# unchanged per-step cost (acceptance 1.50 -> 3.30; the flag changes how many
+# tokens a step yields, not what it costs). 512 is also the setting the depth-curve
+# figures in this branch were produced with. Set SPECULATIVE_DRAFT_WINDOW=none to
+# restore the engine default.
+SPECULATIVE_DRAFT_WINDOW="${SPECULATIVE_DRAFT_WINDOW:-512}"
+WINDOW_ARGS=()
+if [[ "${SPECULATIVE_DRAFT_WINDOW}" != "none" ]]; then
+  WINDOW_ARGS=(--speculative-draft-window-size "${SPECULATIVE_DRAFT_WINDOW}")
+fi
+
+cd "$SGLANG_ROOT"
+printf 'Starting branch: '
+git branch --show-current
+printf 'Commit: '
+git rev-parse --short HEAD
+printf 'Endpoint: http://%s:%s\n' "$HOST" "$PORT"
+printf 'Log: %s\n' "$LOG_FILE"
+printf 'Fused KV: enabled (set SGLANG_DFLASH2_DISABLE_FUSED_KV=1 before running to disable)\n'
+printf 'Draft window: %s\n' "${SPECULATIVE_DRAFT_WINDOW}"
+
+setsid "$VENV_PYTHON" -m sglang.launch_server \
+  --model-path "$TARGET_MODEL" \
+  --served-model-name "$SERVED_MODEL" \
+  --host "$HOST" \
+  --port "$PORT" \
+  --tp-size 2 \
+  --pp-size 1 \
+  --quantization gptq \
+  --dtype bfloat16 \
+  --mamba-ssm-dtype bfloat16 \
+  --kv-cache-dtype bfloat16 \
+  --attention-backend triton \
+  --reasoning-parser qwen3 \
+  --tool-call-parser qwen3_coder \
+  --context-length "$CONTEXT_LENGTH" \
+  --mem-fraction-static "$MEM_FRACTION" \
+  --max-running-requests 1 \
+  --max-mamba-cache-size 8 \
+  --cuda-graph-bs-decode 1 \
+  --triton-attention-num-kv-splits 16 \
+  --chunked-prefill-size 2048 \
+  --decode-log-interval 10 \
+  --sleep-on-idle \
+  --speculative-algorithm DFLASH \
+  --speculative-draft-model-path "$DRAFT_MODEL" \
+  --speculative-draft-model-quantization compressed-tensors \
+  --speculative-num-draft-tokens 8 \
+  --speculative-dflash-block-size 8 \
+  --speculative-draft-attention-backend triton \
+  "${WINDOW_ARGS[@]}" \
+  ${EXTRA_ARGS:-} \
+  >"$LOG_FILE" 2>&1 < /dev/null &
+
+launcher_pid=$!
+printf 'Launcher PID: %s\n' "$launcher_pid"
+
+for _ in $(seq 1 300); do
+  if curl -fsS "http://${HEALTH_HOST}:${PORT}/health" >/dev/null 2>&1; then
+    server_pid="$(port_pid)"
+    printf 'READY\n'
+    printf 'Server PID: %s\n' "${server_pid:-unknown}"
+    printf 'Test with: curl http://%s:%s/v1/models\n' "$HOST" "$PORT"
+    printf 'Log tail:\n'
+    tail -40 "$LOG_FILE"
+    exit 0
+  fi
+  if ! kill -0 "$launcher_pid" 2>/dev/null; then
+    printf 'Server exited before becoming healthy. Last log lines:\n' >&2
+    tail -100 "$LOG_FILE" >&2 || true
+    exit 1
+  fi
+  sleep 2
+done
+
+printf 'Timed out waiting for /health. Last log lines:\n' >&2
+tail -100 "$LOG_FILE" >&2 || true
+exit 1
 ```
+
+The defaults resolve from the setup variables above: `${SGLANG_DIR:-$HOME/github/sglang}`,
+`${PYTHON:-$HOME/venv/sglang/bin/python}`, `$TARGET_MODEL`, `$DRAFT_MODEL` and
+`${SETUP_DIR:-$HOME/sglang-setup}`; the server log goes to `$SETUP_DIR/logs/tp2-dflash-8080.log`
+unless `LOG_FILE` overrides it.
 
 Start on all host interfaces, port 8080:
 
