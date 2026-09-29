@@ -350,7 +350,31 @@ done
 fail_if_port_busy
 mkdir -p "$(dirname "$LOG_FILE")"
 
+# JIT-compiled kernels need ninja, which ships in the venv next to the interpreter
+# but is not on a login/cron PATH. Do not depend on an ambient PATH.
+export PATH="$(dirname "$VENV_PYTHON"):/opt/rocm/bin:$PATH"
 export PYTHONPATH="$SGLANG_ROOT/python/sglang/kernels/aot/python:$SGLANG_ROOT/python${PYTHONPATH:+:$PYTHONPATH}"
+
+# ROCR KFD event-age workaround (see scripts/rdna_ar/README.md and the
+# cookbook-pitfalls "idle-cpu-rocr" record). --sleep-on-idle only parks the
+# Python scheduler loop. Independently, the ROCR runtime re-issues
+# ioctl(AMDKFD_IOC_WAIT_EVENTS) ~72k/s per rank because the stack passes a stale
+# event_age, so each rank still pins a full core at idle (strace: 288,705 ioctls
+# in 4s per rank, each returning in ~3us). This interposer feeds the driver back
+# the last observed age so it actually sleeps; measured on this TP2 rig:
+# 204% -> 7.3% of one core at idle. BOTH fixes are required together.
+# It must be preloaded before the ROCm runtime initialises, which is why it is an
+# LD_PRELOAD here and not an in-process change to SGLang.
+KFD_EVENT_AGE_FIX="${KFD_EVENT_AGE_FIX:-$SGLANG_ROOT/scripts/rdna_ar/vendor/kfd_event_age_fix.so}"
+if [[ ! -e "$KFD_EVENT_AGE_FIX" && -f "$SGLANG_ROOT/scripts/rdna_ar/Makefile" ]]; then
+  make -C "$SGLANG_ROOT/scripts/rdna_ar" >/dev/null 2>&1 || true
+fi
+if [[ -e "$KFD_EVENT_AGE_FIX" ]]; then
+  export LD_PRELOAD="${KFD_EVENT_AGE_FIX}${LD_PRELOAD:+:$LD_PRELOAD}"
+else
+  printf 'WARNING: %s not built; idle CPU will burn ~1 core per rank (KFD event-age spin).\n' \
+    "$KFD_EVENT_AGE_FIX" >&2
+fi
 export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1}"
 export SGLANG_USE_AITER_AR="${SGLANG_USE_AITER_AR:-0}"
 export SGLANG_DFLASH_PHASE_TIMING="${SGLANG_DFLASH_PHASE_TIMING:-0}"
